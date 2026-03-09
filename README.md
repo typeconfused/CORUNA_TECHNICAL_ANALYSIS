@@ -12,22 +12,22 @@ Coruna is a multi-stage, multi-platform exploit chain targeting Apple's Safari/W
 
 ## Table of Contents
 
-1. [Infrastructure & Command-and-Control](#1-infrastructure--command-and-control)
-2. Module System & Obfuscation Layer
-3. Mach-O Binary Parser
-4. Exploit Entry Points (Three Parallel Paths)
-5. JIT Exploit Engine (addrof/fakeobj Primitives)
-6. ARM64 Gadget Scanner
-7. PAC Bypass Chain
-8. JIT Cage Escape
-9. Final Payloads & Post-Exploitation
-10. WebAssembly Module Analysis
-11. Full Decoded String Appendix
-12. IOCs & Detection Signatures
-13. Conclusion
-14. Kernel Exploitation Stage (`dump.bin`)
-15. Kill Chain Integration
-16. Attribution & Threat Actor Profile
+1. [Infrastructure & Command-and-Control](#1-infrastructure-command-and-control)
+2. [Module System & Obfuscation Layer](#2-module-system-obfuscation-layer)
+3. [Mach-O Parser & Dyld Cache Walker](#3-mach-o-parser-dyld-cache-walker)
+4. [WebKit Exploit Primitives](#4-webkit-exploit-primitives)
+5. [Trigger Mechanisms & PAC Bypass](#5-trigger-mechanisms-pac-bypass)
+6. [ARM64 Gadget Scanner](#6-arm64-gadget-scanner)
+7. [PAC Bypass & Authenticated Call Chain](#7-pac-bypass-authenticated-call-chain)
+8. [JIT Cage Escape & Native Code Execution](#8-jit-cage-escape-native-code-execution)
+9. [Final Payload Assembly & Post-Exploitation](#9-final-payload-assembly-post-exploitation)
+10. [Embedded WebAssembly Module Analysis](#10-embedded-webassembly-module-analysis)
+11. [Appendix A - Decoded String Inventory](#11-appendix-a-decoded-string-inventory)
+12. [Appendix B - Indicators of Compromise & Detection](#12-appendix-b-indicators-of-compromise-detection)
+13. [Conclusion](#13-conclusion)
+14. [Kernel Exploitation Stage (`dump.bin`)](#14-kernel-exploitation-stage-dumpbin)
+15. [Kill Chain Integration](#15-kill-chain-integration)
+16. [Attribution & Threat Actor Profile](#16-attribution-threat-actor-profile)
 
 ---
 
